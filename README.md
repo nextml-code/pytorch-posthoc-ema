@@ -1,98 +1,50 @@
-## EMA - Pytorch
+# pytorch post-hoc ema
 
-A simple way to keep track of an Exponential Moving Average (EMA) version of your pytorch model
+> This is a work in progress.
+
+The PyTorch Post-hoc EMA library improves neural network performance by applying Exponential Moving Average (EMA) techniques after training. This approach allows for the adjustment of EMA profiles post-training, which is crucial for optimizing model weight stabilization without predefining decay parameters.
+
+By implementing the post-hoc synthesized EMA method from Karras et al., the library offers flexibility in exploring EMA profiles' effects on training and sampling. It seamlessly integrates with PyTorch models, making it easy to enhance machine learning projects with post-hoc EMA adjustments.
+
+This library was adapted from the [ema-pytorch](https://github.com/lucidrains/ema-pytorch) repository by lucidrains.
+
+TODO:
+
+- [ ] Investigate best options for saving checkpoints
+- [ ] Implement new usage
+- [ ] Add tests
+- [ ] Optimize vram usage
 
 ## Install
 
 ```bash
-$ pip install ema-pytorch
+poetry add pytorch-post-hoc-ema
 ```
 
 ## Usage
 
 ```python
 import torch
-from ema_pytorch import EMA
+from posthoc_ema import PostHocEMA
 
-# your neural network as a pytorch module
+model = torch.nn.Linear(512, 512)
 
-net = torch.nn.Linear(512, 512)
-
-# wrap your neural network, specify the decay (beta)
-
-ema = EMA(
-    net,
-    beta = 0.9999,              # exponential moving average factor
-    update_after_step = 100,    # only after this number of .update() calls will it start updating
-    update_every = 10,          # how often to actually update, to save on compute (updates every 10th .update() call)
-)
-
-# mutate your network, with SGD or otherwise
-
-with torch.no_grad():
-    net.weight.copy_(torch.randn_like(net.weight))
-    net.bias.copy_(torch.randn_like(net.bias))
-
-# you will call the update function on your moving average wrapper
-
-ema.update()
-
-# then, later on, you can invoke the EMA model the same way as your network
-
-data = torch.randn(1, 512)
-
-output     = net(data)
-ema_output = ema(data)
-
-# if you want to save your ema model, it is recommended you save the entire wrapper
-# as it contains the number of steps taken (there is a warmup logic in there, recommended by @crowsonkb, validated for a number of projects now)
-# however, if you wish to access the copy of your model with EMA, then it will live at ema.ema_model
-```
-
-In order to use the post-hoc synthesized EMA, proposed by Karras et al. in <a href="https://arxiv.org/abs/2312.02696">a recent paper</a>, follow the example below
-
-```python
-import torch
-from ema_pytorch import PostHocEMA
-
-# your neural network as a pytorch module
-
-net = torch.nn.Linear(512, 512)
-
-# wrap your neural network, specify the sigma_rels or gammas
-
-emas = PostHocEMA(
-    net,
-    sigma_rels = (0.05, 0.3),           # a tuple with the hyperparameter for the multiple EMAs. you need at least 2 here to synthesize a new one
-    update_every = 10,                  # how often to actually update, to save on compute (updates every 10th .update() call)
-    checkpoint_every_num_steps = 10,
-    checkpoint_folder = './post-hoc-ema-checkpoints'  # the folder of saved checkpoints for each sigma_rel (gamma) across timesteps with the hparam above, used to synthesizing a new EMA model after training
-)
-
-net.train()
+ema = PostHocEMA(model)
 
 for _ in range(1000):
-    # mutate your network, with SGD or otherwise
 
+    # mutate your network, normally with an optimizer
     with torch.no_grad():
-        net.weight.copy_(torch.randn_like(net.weight))
-        net.bias.copy_(torch.randn_like(net.bias))
+        model.weight.copy_(torch.randn_like(model.weight))
+        model.bias.copy_(torch.randn_like(model.bias))
 
-    # you will call the update function on your moving average wrapper
-
-    emas.update()
-
-# now that you have a few checkpoints
-# you can synthesize an EMA model with a different sigma_rel (say 0.15)
-
-synthesized_ema = emas.synthesize_ema_model(sigma_rel = 0.15)
-
-# output with synthesized EMA
+    ema.update()
 
 data = torch.randn(1, 512)
+output = model(data)
 
-synthesized_ema_output = synthesized_ema(data)
-
+with ema.model(sigma_rel=0.15) as ema_model:
+    ema_output = ema_model(data)
 ```
 
 ## Citations
