@@ -1,5 +1,43 @@
 """
 Reference implementation of PostHocEMA from Lucidrains.
+
+This module implements the Post-hoc EMA technique described in the paper
+"Analyzing and Improving the Training Dynamics of Diffusion Models" (https://arxiv.org/abs/2312.02696).
+
+Example:    ```python
+    import torch
+    from ema_pytorch import PostHocEMA
+
+    # your neural network as a pytorch module
+    net = torch.nn.Linear(512, 512)
+
+    # wrap your neural network, specify the sigma_rels or gammas
+    emas = PostHocEMA(
+        net,
+        sigma_rels = (0.05, 0.28),           # a tuple with the hyperparameter for the multiple EMAs
+        update_every = 10,                    # update every 10th call to save compute
+        checkpoint_every_num_steps = 10,
+        checkpoint_folder = './post-hoc-ema-checkpoints'  # folder for checkpoints used in synthesis
+    )
+
+    net.train()
+
+    for _ in range(1000):
+        # mutate your network, with SGD or otherwise
+        with torch.no_grad():
+            net.weight.copy_(torch.randn_like(net.weight))
+            net.bias.copy_(torch.randn_like(net.bias))
+
+        # update your moving average wrapper
+        emas.update()
+
+    # now that you have a few checkpoints
+    # you can synthesize an EMA model with a different sigma_rel (say 0.15)
+    synthesized_ema = emas.synthesize_ema_model(sigma_rel = 0.15)
+
+    # output with synthesized EMA
+    data = torch.randn(1, 512)
+    synthesized_ema_output = synthesized_ema(data)    ```
 """
 
 from __future__ import annotations
@@ -7,7 +45,7 @@ from __future__ import annotations
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import Set, Tuple
+from typing import Callable, Literal
 
 import numpy as np
 import torch
@@ -16,18 +54,27 @@ from torch.nn import Module, ModuleList
 
 
 def exists(val):
+    """Check if a value exists (is not None)."""
     return val is not None
 
 
 def default(val, d):
+    """Return val if it exists, otherwise return default value d."""
     return val if exists(val) else d
 
 
 def first(arr):
+    """Return the first element of an array."""
     return arr[0]
 
 
+def divisible_by(num, den):
+    """Check if num is divisible by den."""
+    return (num % den) == 0
+
+
 def get_module_device(m: Module):
+    """Get the device of a PyTorch module by checking its first parameter."""
     return next(m.parameters()).device
 
 
@@ -55,8 +102,24 @@ def sigma_rel_to_gamma(sigma_rel):
 
 class KarrasEMA(Module):
     """
-    exponential moving average module that uses hyperparameters from the paper https://arxiv.org/abs/2312.02696
-    can either use gamma or sigma_rel from paper
+    Exponential Moving Average module using hyperparameters from the Karras et al. paper.
+
+    This implements the power function EMA profile described in Section 3.1 of the paper.
+    It can be parameterized either using gamma directly or using the more intuitive sigma_rel
+    parameter.
+
+    Args:
+        model: The model to create an EMA of
+        sigma_rel: Relative standard deviation for EMA profile width
+        gamma: Direct gamma parameter (alternative to sigma_rel)
+        ema_model: Optional pre-initialized EMA model or callable that returns one
+        update_every: Number of steps between EMA updates
+        frozen: If True, EMA weights are not updated
+        param_or_buffer_names_no_ema: Set of parameter/buffer names to exclude from EMA
+        ignore_names: Set of names to ignore
+        ignore_startswith_names: Set of name prefixes to ignore
+        allow_different_devices: Allow EMA model to be on different device than online model
+        move_ema_to_online_device: Move EMA model to same device as online model if different
     """
 
     def __init__(
@@ -65,12 +128,13 @@ class KarrasEMA(Module):
         sigma_rel: float | None = None,
         gamma: float | None = None,
         ema_model: Module
+        | Callable[[], Module]
         | None = None,  # if your model has lazylinears or other types of non-deepcopyable modules, you can pass in your own ema model
         update_every: int = 100,
         frozen: bool = False,
-        param_or_buffer_names_no_ema: Set[str] = set(),
-        ignore_names: Set[str] = set(),
-        ignore_startswith_names: Set[str] = set(),
+        param_or_buffer_names_no_ema: set[str] = set(),
+        ignore_names: set[str] = set(),
+        ignore_startswith_names: set[str] = set(),
         allow_different_devices=False,  # if the EMA model is on a different device (say CPU), automatically move the tensor
         move_ema_to_online_device=False,  # will move entire EMA model to the same device as online model, if different
     ):
@@ -87,6 +151,11 @@ class KarrasEMA(Module):
         self.frozen = frozen
 
         self.online_model = [model]
+
+        # handle callable returning ema module
+
+        if not isinstance(ema_model, Module) and callable(ema_model):
+            ema_model = ema_model()
 
         # ema model
 
@@ -326,12 +395,31 @@ def solve_weights(t_i, gamma_i, t_r, gamma_r):
 
 
 class PostHocEMA(Module):
+    """
+    Post-hoc EMA implementation that allows synthesizing arbitrary EMA profiles after training.
+
+    This implements the technique described in Section 3.2 of the paper. It maintains multiple
+    EMA models during training with different gamma values, allowing reconstruction of arbitrary
+    EMA profiles afterwards through optimal linear combination.
+
+    Args:
+        model: The model to create EMAs of
+        ema_model: Optional callable that returns pre-initialized EMA models
+        sigma_rels: Tuple of relative standard deviations for the maintained EMA models
+        gammas: Tuple of gamma values (alternative to sigma_rels)
+        checkpoint_every_num_steps: Number of steps between checkpoints or "manual" for manual checkpointing
+        checkpoint_folder: Directory to store checkpoints
+        checkpoint_dtype: Data type for checkpoint storage
+        **kwargs: Additional arguments passed to KarrasEMA
+    """
+
     def __init__(
         self,
         model: Module,
-        sigma_rels: Tuple[float, ...] | None = None,
-        gammas: Tuple[float, ...] | None = None,
-        checkpoint_every_num_steps: int = 1000,
+        ema_model: Callable[[], Module] | None = None,
+        sigma_rels: tuple[float, ...] | None = None,
+        gammas: tuple[float, ...] | None = None,
+        checkpoint_every_num_steps: int | Literal["manual"] = 1000,
         checkpoint_folder: str = "./post-hoc-ema-checkpoints",
         checkpoint_dtype: torch.dtype = torch.float16,
         **kwargs,
@@ -347,12 +435,17 @@ class PostHocEMA(Module):
         ), "at least 2 ema models with different gammas in order to synthesize new ema models of a different gamma"
         assert len(set(gammas)) == len(gammas), "calculated gammas must be all unique"
 
+        self.maybe_ema_model = ema_model
+
         self.gammas = gammas
         self.num_ema_models = len(gammas)
 
         self._model = [model]
         self.ema_models = ModuleList(
-            [KarrasEMA(model, gamma=gamma, **kwargs) for gamma in gammas]
+            [
+                KarrasEMA(model, ema_model=ema_model, gamma=gamma, **kwargs)
+                for gamma in gammas
+            ]
         )
 
         self.checkpoint_folder = Path(checkpoint_folder)
@@ -384,20 +477,42 @@ class PostHocEMA(Module):
             ema_model.copy_params_from_ema_to_model()
 
     def update(self):
+        """
+        Update all EMA models and create checkpoints if needed.
+
+        Updates each EMA model's parameters and creates checkpoints based on
+        checkpoint_every_num_steps setting. If checkpoint_every_num_steps is "manual",
+        checkpointing must be triggered explicitly.
+        """
         for ema_model in self.ema_models:
             ema_model.update()
 
-        if not (self.step.item() % self.checkpoint_every_num_steps):
+        if self.checkpoint_every_num_steps == "manual":
+            return
+
+        if divisible_by(self.step.item(), self.checkpoint_every_num_steps):
             self.checkpoint()
 
     def checkpoint(self):
+        """
+        Save checkpoints of all EMA models.
+
+        Creates checkpoint files in the checkpoint_folder with naming format:
+        "{ema_model_index}.{current_step}.pt"
+
+        The checkpoints are saved in the specified checkpoint_dtype to save storage.
+        """
         step = self.step.item()
 
         for ind, ema_model in enumerate(self.ema_models):
             filename = f"{ind}.{step}.pt"
             path = self.checkpoint_folder / filename
 
-            pkg = deepcopy(ema_model).to(self.checkpoint_dtype).state_dict()
+            pkg = {
+                k: v.to(self.checkpoint_dtype)
+                for k, v in ema_model.state_dict().items()
+            }
+
             torch.save(pkg, str(path))
 
     def synthesize_ema_model(
@@ -406,6 +521,29 @@ class PostHocEMA(Module):
         sigma_rel: float | None = None,
         step: int | None = None,
     ) -> KarrasEMA:
+        """
+        Synthesize a new EMA model with arbitrary gamma/sigma_rel after training.
+
+        This implements Algorithm 3 from the paper, which allows creating an EMA model
+        with any desired decay profile by optimally combining the checkpointed EMA models.
+
+        Args:
+            gamma: Target gamma value for the synthesized model
+            sigma_rel: Alternative parameterization via relative std dev (converts to gamma)
+            step: Target training step to synthesize for (defaults to latest available)
+
+        Returns:
+            KarrasEMA: A new EMA model with the requested profile
+
+        Raises:
+            AssertionError: If neither gamma nor sigma_rel is provided, or if requested
+                step is greater than available checkpoints
+
+        Note:
+            This method requires that checkpoints were saved during training via the
+            checkpoint() method. The accuracy of the synthesized profile improves with
+            the number of available checkpoints.
+        """
         assert exists(gamma) ^ exists(sigma_rel)
         device = self.device
 
@@ -413,7 +551,10 @@ class PostHocEMA(Module):
             gamma = sigma_rel_to_gamma(sigma_rel)
 
         synthesized_ema_model = KarrasEMA(
-            model=self.model, gamma=gamma, **self.ema_kwargs
+            model=self.model,
+            ema_model=self.maybe_ema_model,
+            gamma=gamma,
+            **self.ema_kwargs,
         )
 
         synthesized_ema_model
@@ -449,7 +590,12 @@ class PostHocEMA(Module):
 
         # now sum up all the checkpoints using the weights one by one
 
-        tmp_ema_model = KarrasEMA(model=self.model, gamma=gamma, **self.ema_kwargs)
+        tmp_ema_model = KarrasEMA(
+            model=self.model,
+            ema_model=self.maybe_ema_model,
+            gamma=gamma,
+            **self.ema_kwargs,
+        )
 
         for ind, (checkpoint, weight) in enumerate(zip(checkpoints, weights.tolist())):
             is_first = ind == 0

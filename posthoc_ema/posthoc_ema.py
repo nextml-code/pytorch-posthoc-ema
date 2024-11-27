@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import Set, Tuple
+from typing import Callable, Literal
 
 import numpy as np
 import torch
@@ -21,6 +21,10 @@ def default(val, d):
 
 def first(arr):
     return arr[0]
+
+
+def divisible_by(num, den):
+    return (num % den) == 0
 
 
 def get_module_device(m: Module):
@@ -61,12 +65,13 @@ class KarrasEMA(Module):
         sigma_rel: float | None = None,
         gamma: float | None = None,
         ema_model: Module
+        | Callable[[], Module]
         | None = None,  # if your model has lazylinears or other types of non-deepcopyable modules, you can pass in your own ema model
         update_every: int = 100,
         frozen: bool = False,
-        param_or_buffer_names_no_ema: Set[str] = set(),
-        ignore_names: Set[str] = set(),
-        ignore_startswith_names: Set[str] = set(),
+        param_or_buffer_names_no_ema: set[str] = set(),
+        ignore_names: set[str] = set(),
+        ignore_startswith_names: set[str] = set(),
         allow_different_devices=False,  # if the EMA model is on a different device (say CPU), automatically move the tensor
         move_ema_to_online_device=False,  # will move entire EMA model to the same device as online model, if different
     ):
@@ -83,6 +88,11 @@ class KarrasEMA(Module):
         self.frozen = frozen
 
         self.online_model = [model]
+
+        # handle callable returning ema module
+
+        if not isinstance(ema_model, Module) and callable(ema_model):
+            ema_model = ema_model()
 
         # ema model
 
@@ -325,9 +335,10 @@ class PostHocEMA(Module):
     def __init__(
         self,
         model: Module,
-        sigma_rels: Tuple[float, ...] | None = None,
-        gammas: Tuple[float, ...] | None = None,
-        checkpoint_every_num_steps: int = 1000,
+        ema_model: Callable[[], Module] | None = None,
+        sigma_rels: tuple[float, ...] | None = None,
+        gammas: tuple[float, ...] | None = None,
+        checkpoint_every_num_steps: int | Literal["manual"] = 1000,
         checkpoint_folder: str = "./post-hoc-ema-checkpoints",
         checkpoint_dtype: torch.dtype = torch.float16,
         **kwargs,
@@ -343,12 +354,17 @@ class PostHocEMA(Module):
         ), "at least 2 ema models with different gammas in order to synthesize new ema models of a different gamma"
         assert len(set(gammas)) == len(gammas), "calculated gammas must be all unique"
 
+        self.maybe_ema_model = ema_model
+
         self.gammas = gammas
         self.num_ema_models = len(gammas)
 
         self._model = [model]
         self.ema_models = ModuleList(
-            [KarrasEMA(model, gamma=gamma, **kwargs) for gamma in gammas]
+            [
+                KarrasEMA(model, ema_model=ema_model, gamma=gamma, **kwargs)
+                for gamma in gammas
+            ]
         )
 
         self.checkpoint_folder = Path(checkpoint_folder)
@@ -383,7 +399,10 @@ class PostHocEMA(Module):
         for ema_model in self.ema_models:
             ema_model.update()
 
-        if not (self.step.item() % self.checkpoint_every_num_steps):
+        if self.checkpoint_every_num_steps == "manual":
+            return
+
+        if divisible_by(self.step.item(), self.checkpoint_every_num_steps):
             self.checkpoint()
 
     def checkpoint(self):
@@ -393,7 +412,11 @@ class PostHocEMA(Module):
             filename = f"{ind}.{step}.pt"
             path = self.checkpoint_folder / filename
 
-            pkg = deepcopy(ema_model).to(self.checkpoint_dtype).state_dict()
+            pkg = {
+                k: v.to(self.checkpoint_dtype)
+                for k, v in ema_model.state_dict().items()
+            }
+
             torch.save(pkg, str(path))
 
     def synthesize_ema_model(
@@ -409,7 +432,10 @@ class PostHocEMA(Module):
             gamma = sigma_rel_to_gamma(sigma_rel)
 
         synthesized_ema_model = KarrasEMA(
-            model=self.model, gamma=gamma, **self.ema_kwargs
+            model=self.model,
+            ema_model=self.maybe_ema_model,
+            gamma=gamma,
+            **self.ema_kwargs,
         )
 
         synthesized_ema_model
@@ -445,7 +471,12 @@ class PostHocEMA(Module):
 
         # now sum up all the checkpoints using the weights one by one
 
-        tmp_ema_model = KarrasEMA(model=self.model, gamma=gamma, **self.ema_kwargs)
+        tmp_ema_model = KarrasEMA(
+            model=self.model,
+            ema_model=self.maybe_ema_model,
+            gamma=gamma,
+            **self.ema_kwargs,
+        )
 
         for ind, (checkpoint, weight) in enumerate(zip(checkpoints, weights.tolist())):
             is_first = ind == 0

@@ -59,3 +59,25 @@ with ema.model(sigma_rel=0.15) as ema_model:
     url     = {https://api.semanticscholar.org/CorpusID:265659032}
 }
 ```
+
+```bibtex
+@article{Lee2024SlowAS,
+    title   = {Slow and Steady Wins the Race: Maintaining Plasticity with Hare and Tortoise Networks},
+    author  = {Hojoon Lee and Hyeonseo Cho and Hyunseung Kim and Donghu Kim and Dugki Min and Jaegul Choo and Clare Lyle},
+    journal = {ArXiv},
+    year    = {2024},
+    volume  = {abs/2406.02596},
+    url     = {https://api.semanticscholar.org/CorpusID:270258586}
+}
+```
+
+```bibtex
+@article{Li2024SwitchEA,
+    title   = {Switch EMA: A Free Lunch for Better Flatness and Sharpness},
+    author  = {Siyuan Li and Zicheng Liu and Juanxi Tian and Ge Wang and Zedong Wang and Weiyang Jin and Di Wu and Cheng Tan and Tao Lin and Yang Liu and Baigui Sun and Stan Z. Li},
+    journal = {ArXiv},
+    year    = {2024},
+    volume  = {abs/2402.09240},
+    url     = {https://api.semanticscholar.org/CorpusID:267657558}
+}
+```
