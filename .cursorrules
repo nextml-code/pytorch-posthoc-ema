@@ -1,0 +1,4 @@
+- Use pydantic 2
+- Use black formatting
+- Avoid methods with sideeffects and if they are needed then add a "_" suffix
+- Prefer pathlib over os

@@ -6,7 +6,7 @@ The PyTorch Post-hoc EMA library improves neural network performance by applying
 
 By implementing the post-hoc synthesized EMA method from Karras et al., the library offers flexibility in exploring EMA profiles' effects on training and sampling. It seamlessly integrates with PyTorch models, making it easy to enhance machine learning projects with post-hoc EMA adjustments.
 
-This library was adapted from the [ema-pytorch](https://github.com/lucidrains/ema-pytorch) repository by lucidrains.
+This library was adapted from [ema-pytorch](https://github.com/lucidrains/ema-pytorch) by lucidrains.
 
 TODO:
 
@@ -18,7 +18,7 @@ TODO:
 ## Install
 
 ```bash
-poetry add pytorch-post-hoc-ema
+poetry add pytorch-posthoc-ema
 ```
 
 ## Usage
