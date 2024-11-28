@@ -1,6 +1,3 @@
-from posthoc_ema.ema_pytorch import EMA
-
-from posthoc_ema.posthoc_ema import (
-    KarrasEMA,
-    PostHocEMA
-)
+from .karras_ema import KarrasEMA
+from .posthoc_ema import PostHocEMA
+from .vanilla_ema import VanillaEMA

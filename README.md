@@ -8,6 +8,18 @@ By implementing the post-hoc synthesized EMA method from Karras et al., the libr
 
 This library was adapted from [ema-pytorch](https://github.com/lucidrains/ema-pytorch) by lucidrains.
 
+Why?
+
+- Simplified or more explicit usage
+- Opinionated defaults
+
+New features:
+
+- Select number of checkpoints to keep
+- Switch EMA also with PostHocEMA
+- Low VRAM usage by keeping EMA on cpu
+- Low VRAM synthesization
+
 TODO:
 
 - [ ] Investigate best options for saving checkpoints
@@ -29,7 +41,10 @@ from posthoc_ema import PostHocEMA
 
 model = torch.nn.Linear(512, 512)
 
-ema = PostHocEMA(model)
+posthoc_ema = PostHocEMA(
+    "posthoc-ema",
+    model,
+)
 
 for _ in range(1000):
 
@@ -38,13 +53,43 @@ for _ in range(1000):
         model.weight.copy_(torch.randn_like(model.weight))
         model.bias.copy_(torch.randn_like(model.bias))
 
-    ema.update()
+    posthoc_ema.update(model)
 
 data = torch.randn(1, 512)
-output = model(data)
+predictions = model(data)
 
-with ema.model(sigma_rel=0.15) as ema_model:
-    ema_output = ema_model(data)
+# use the helper
+with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
+    ema_predictions = ema_model(data)
+
+# or without magic
+model.cpu()
+
+ema_state_dict = posthoc_ema.state_dict(sigma_rel=0.15) as state_dict:
+ema_model = deepcopy(model)
+ema_model.load_state_dict(state_dict)
+ema_predictions = ema_model(data)
+del ema_model
+```
+
+Synthesize after training:
+
+```python
+posthoc_ema = PostHocEMA(
+    "posthoc-ema",
+    model,
+)
+
+with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
+    ema_predictions = ema_model(data)
+```
+
+Or without model:
+
+```python
+posthoc_ema = PostHocEMA("posthoc-ema")
+
+ema_state_dict = posthoc_ema.state_dict(sigma_rel=0.15)
 ```
 
 ## Citations
