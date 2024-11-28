@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 import torch
 from torch import nn
@@ -15,9 +15,8 @@ from .utils import sigma_rel_to_gamma, solve_weights
 class PostHocEMA:
     """
     Post-hoc EMA implementation with simplified interface and memory management.
-
+    
     Args:
-        model: The model to create EMAs of
         checkpoint_dir: Directory to store checkpoints
         max_checkpoints: Maximum number of checkpoints to keep per EMA model
         sigma_rels: Tuple of relative standard deviations for the maintained EMA models
@@ -28,7 +27,6 @@ class PostHocEMA:
 
     def __init__(
         self,
-        model: nn.Module,
         checkpoint_dir: str | Path,
         max_checkpoints: int = 100,
         sigma_rels: tuple[float, ...] = (0.05, 0.28),
@@ -37,27 +35,82 @@ class PostHocEMA:
         checkpoint_dtype: torch.dtype = torch.float16,
     ):
         self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
-
         self.max_checkpoints = max_checkpoints
         self.checkpoint_dtype = checkpoint_dtype
         self.update_every = update_every
         self.checkpoint_every = checkpoint_every
-
-        # Initialize EMA models
         self.sigma_rels = sigma_rels
         self.gammas = tuple(map(sigma_rel_to_gamma, sigma_rels))
         
-        # Create EMA models with shared online model reference
-        self.ema_models = nn.ModuleList([
+        self.step = 0
+        self.ema_models = None
+
+    @classmethod
+    def from_model(
+        cls,
+        model: nn.Module,
+        checkpoint_dir: str | Path,
+        **kwargs,
+    ) -> PostHocEMA:
+        """
+        Create PostHocEMA instance from a model for training.
+        
+        Args:
+            model: Model to create EMAs from
+            checkpoint_dir: Directory to store checkpoints
+            **kwargs: Additional arguments passed to constructor
+            
+        Returns:
+            PostHocEMA: Instance ready for training
+        """
+        instance = cls(checkpoint_dir=checkpoint_dir, **kwargs)
+        instance.checkpoint_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Initialize EMA models
+        instance.ema_models = nn.ModuleList([
             KarrasEMA(
                 model,
                 sigma_rel=sigma_rel,
-                update_every=update_every,
-            ) for sigma_rel in sigma_rels
+                update_every=instance.update_every,
+            ) for sigma_rel in instance.sigma_rels
         ])
+        
+        return instance
 
-        self.step = 0
+    @classmethod
+    def from_path(
+        cls,
+        checkpoint_dir: str | Path,
+        model: Optional[nn.Module] = None,
+        **kwargs,
+    ) -> PostHocEMA:
+        """
+        Load PostHocEMA instance from checkpoint directory.
+        
+        Args:
+            checkpoint_dir: Directory containing checkpoints
+            model: Optional model for parameter structure
+            **kwargs: Additional arguments passed to constructor
+            
+        Returns:
+            PostHocEMA: Instance ready for synthesis
+        """
+        checkpoint_dir = Path(checkpoint_dir)
+        assert checkpoint_dir.exists(), f"Checkpoint directory {checkpoint_dir} does not exist"
+        
+        instance = cls(checkpoint_dir=checkpoint_dir, **kwargs)
+        
+        # Initialize EMA models if model provided
+        if model is not None:
+            instance.ema_models = nn.ModuleList([
+                KarrasEMA(
+                    model,
+                    sigma_rel=sigma_rel,
+                    update_every=instance.update_every,
+                ) for sigma_rel in instance.sigma_rels
+            ])
+        
+        return instance
 
     def update(self, model: nn.Module) -> None:
         """
@@ -88,8 +141,9 @@ class PostHocEMA:
             filename = f"{idx}.{self.step}.pt"
             path = self.checkpoint_dir / filename
 
+            # Save with double precision for internal checkpoints
             state_dict = {
-                k: v.to(self.checkpoint_dtype)
+                k: v.to(dtype=torch.float64)
                 for k, v in ema_model.state_dict().items()
             }
             torch.save(state_dict, path)
@@ -176,14 +230,14 @@ class PostHocEMA:
             timesteps
         ), f"Cannot synthesize for step {step} > max available step {max(timesteps)}"
 
-        # Solve for optimal weights
-        gamma_i = torch.tensor(gammas, device=device)
-        t_i = torch.tensor(timesteps, device=device)
-        gamma_r = torch.tensor([gamma], device=device)
-        t_r = torch.tensor([step], device=device)
+        # Solve for optimal weights using double precision
+        gamma_i = torch.tensor(gammas, device=device, dtype=torch.float64)
+        t_i = torch.tensor(timesteps, device=device, dtype=torch.float64)
+        gamma_r = torch.tensor([gamma], device=device, dtype=torch.float64)
+        t_r = torch.tensor([step], device=device, dtype=torch.float64)
 
-        weights = solve_weights(t_i, gamma_i, t_r, gamma_r)
-        weights = weights.squeeze(-1)
+        weights = self._solve_weights(t_i, gamma_i, t_r, gamma_r)
+        weights = weights.squeeze(-1).to(dtype=torch.float64)  # Keep in float64
 
         # Load first checkpoint to get state dict structure
         ckpt = torch.load(str(checkpoints[0]), map_location=device)
@@ -192,9 +246,9 @@ class PostHocEMA:
         model_keys = {k.replace("ema_model.", ""): k for k in ckpt.keys() 
                      if k.startswith("ema_model.")}
         
-        # Zero initialize synthesized state
+        # Zero initialize synthesized state with double precision
         synth_state = {
-            k: torch.zeros_like(ckpt[v], device=device) 
+            k: torch.zeros_like(ckpt[v], device=device, dtype=torch.float64) 
             for k, v in model_keys.items()
         }
 
@@ -202,6 +256,36 @@ class PostHocEMA:
         for checkpoint, weight in zip(checkpoints, weights.tolist()):
             ckpt_state = torch.load(str(checkpoint), map_location=device)
             for k, v in model_keys.items():
-                synth_state[k].add_(ckpt_state[v] * weight)
+                # Convert checkpoint tensor to double precision
+                ckpt_tensor = ckpt_state[v].to(dtype=torch.float64)
+                # Use double precision for accumulation
+                synth_state[k].add_(ckpt_tensor * weight)
+
+        # Convert final state to target dtype
+        synth_state = {
+            k: v.to(dtype=self.checkpoint_dtype)
+            for k, v in synth_state.items()
+        }
 
         return synth_state
+
+    def _solve_weights(
+        self,
+        t_i: torch.Tensor,
+        gamma_i: torch.Tensor,
+        t_r: torch.Tensor,
+        gamma_r: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Solve for optimal weights to synthesize target EMA profile.
+        
+        Args:
+            t_i: Timesteps of stored checkpoints
+            gamma_i: Gamma values of stored checkpoints
+            t_r: Target timestep
+            gamma_r: Target gamma value
+            
+        Returns:
+            torch.Tensor: Optimal weights for combining checkpoints
+        """
+        return solve_weights(t_i, gamma_i, t_r, gamma_r)

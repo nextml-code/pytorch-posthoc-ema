@@ -41,10 +41,7 @@ from posthoc_ema import PostHocEMA
 
 model = torch.nn.Linear(512, 512)
 
-posthoc_ema = PostHocEMA(
-    "posthoc-ema",
-    model,
-)
+posthoc_ema = PostHocEMA.from_model(model, "posthoc-ema")
 
 for _ in range(1000):
 
@@ -75,10 +72,7 @@ del ema_model
 Synthesize after training:
 
 ```python
-posthoc_ema = PostHocEMA(
-    "posthoc-ema",
-    model,
-)
+posthoc_ema = PostHocEMA.from_path("posthoc-ema", model)
 
 with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
     ema_predictions = ema_model(data)
@@ -87,7 +81,7 @@ with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
 Or without model:
 
 ```python
-posthoc_ema = PostHocEMA("posthoc-ema")
+posthoc_ema = PostHocEMA.from_path("posthoc-ema")
 
 ema_state_dict = posthoc_ema.state_dict(sigma_rel=0.15)
 ```
