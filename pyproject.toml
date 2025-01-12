@@ -18,6 +18,8 @@ pylint = "^2.6.0"
 autoflake = "^1.6.1"
 pytest = "^6.1.2"
 ruff = "^0.7.1"
+ipykernel = "^6.29.5"
+ipywidgets = "^8.1.5"
 
 [build-system]
 requires = ["poetry-core"]
