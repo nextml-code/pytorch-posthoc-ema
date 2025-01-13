@@ -156,8 +156,8 @@ def test_same_output_as_reference():
     our_files = sorted(Path("./test-checkpoints-our").glob("*.pt"))
 
     for ref_file, our_file in zip(ref_files, our_files):
-        ref_state = torch.load(ref_file)
-        our_state = torch.load(our_file)
+        ref_state = torch.load(ref_file, weights_only=True)
+        our_state = torch.load(our_file, weights_only=True)
         print(f"\nComparing {ref_file.name} vs {our_file.name}:")
 
         # Map reference keys to our keys

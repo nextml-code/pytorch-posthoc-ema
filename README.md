@@ -26,6 +26,7 @@ TODO:
 - [ ] Implement new usage
 - [ ] Add tests
 - [ ] Optimize vram usage
+- [ ] Add helper function for setting vanilla state to ema state
 
 ## Install
 

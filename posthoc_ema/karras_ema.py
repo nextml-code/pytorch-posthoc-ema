@@ -18,21 +18,18 @@ def get_module_device(m: Module):
     return next(m.parameters()).device
 
 
-def inplace_copy(tgt: Tensor, src: Tensor, *, auto_move_device=False):
+def inplace_copy(tgt: Tensor, src: Tensor):
     """
     Inplace copy of src tensor to tgt tensor.
 
     Args:
         tgt: Target tensor to copy to
         src: Source tensor to copy from
-        auto_move_device: If True, automatically move src to tgt's device
     """
-    if auto_move_device:
-        src = src.to(tgt.device)
-    tgt.copy_(src)
+    tgt.copy_(src.to(tgt.device))
 
 
-def inplace_lerp(tgt: Tensor, src: Tensor, weight, *, auto_move_device=False):
+def inplace_lerp(tgt: Tensor, src: Tensor, weight):
     """
     Inplace linear interpolation between tgt and src tensors.
 
@@ -40,11 +37,8 @@ def inplace_lerp(tgt: Tensor, src: Tensor, weight, *, auto_move_device=False):
         tgt: Target tensor to interpolate
         src: Source tensor to interpolate towards
         weight: Interpolation weight between 0 and 1
-        auto_move_device: If True, automatically move src to tgt's device
     """
-    if auto_move_device:
-        src = src.to(tgt.device)
-    tgt.lerp_(src, weight)
+    tgt.lerp_(src.to(tgt.device), weight)
 
 
 class KarrasEMA(Module):
@@ -61,8 +55,6 @@ class KarrasEMA(Module):
         param_or_buffer_names_no_ema: Set of parameter/buffer names to exclude from EMA
         ignore_names: Set of names to ignore
         ignore_startswith_names: Set of name prefixes to ignore
-        allow_different_devices: Allow EMA model to be on different device than online model
-        move_ema_to_online_device: Move EMA model to same device as online model if different
     """
 
     def __init__(
@@ -76,8 +68,6 @@ class KarrasEMA(Module):
         param_or_buffer_names_no_ema: set[str] = set(),
         ignore_names: set[str] = set(),
         ignore_startswith_names: set[str] = set(),
-        allow_different_devices: bool = False,
-        move_ema_to_online_device: bool = False,
     ):
         super().__init__()
 
@@ -92,16 +82,21 @@ class KarrasEMA(Module):
         self.frozen = frozen
         self.update_every = update_every
 
+        # Store reference to online model
         self.online_model = [model]
 
         # Initialize EMA model
         if callable(ema_model) and not isinstance(ema_model, Module):
             ema_model = ema_model()
 
-        self.ema_model = ema_model if exists(ema_model) else deepcopy(model)
+        # Create EMA model on CPU
+        self.ema_model = (ema_model if exists(ema_model) else deepcopy(model)).cpu()
 
+        # Ensure all parameters and buffers are on CPU and detached
         for p in self.ema_model.parameters():
-            p.detach_()
+            p.data = p.data.cpu().detach()
+        for b in self.ema_model.buffers():
+            b.data = b.data.cpu().detach()
 
         # Parameter and buffer names
         self.parameter_names = {
@@ -115,26 +110,14 @@ class KarrasEMA(Module):
             if torch.is_floating_point(buffer) or torch.is_complex(buffer)
         }
 
-        # Device management
-        self.allow_different_devices = allow_different_devices
-        self.move_ema_to_online_device = move_ema_to_online_device
-
-        # Update functions
-        self.inplace_copy = partial(
-            inplace_copy, auto_move_device=allow_different_devices
-        )
-        self.inplace_lerp = partial(
-            inplace_lerp, auto_move_device=allow_different_devices
-        )
-
         # Names to ignore
         self.param_or_buffer_names_no_ema = param_or_buffer_names_no_ema
         self.ignore_names = ignore_names
         self.ignore_startswith_names = ignore_startswith_names
 
-        # State
-        self.register_buffer("initted", torch.tensor(False))
-        self.register_buffer("step", torch.tensor(0))
+        # State buffers on CPU
+        self.register_buffer("initted", torch.tensor(False, device="cpu"))
+        self.register_buffer("step", torch.tensor(0, device="cpu"))
 
     @property
     def beta(self):
@@ -151,7 +134,7 @@ class KarrasEMA(Module):
 
         if not self.initted.item():
             self.copy_params_from_model_to_ema()
-            self.initted.data.copy_(torch.tensor(True))
+            self.initted.data.copy_(torch.tensor(True, device=self.initted.device))
 
         if not self.frozen:
             self.update_moving_average()
@@ -163,13 +146,10 @@ class KarrasEMA(Module):
             self.get_params_iter(self.online_model[0]),
         ):
             if self._should_update_param(name):
-                self.inplace_copy(ma_params.data, current_params.data)
+                inplace_copy(ma_params.data, current_params.data)
 
     def update_moving_average(self):
         """Update EMA weights using current beta value."""
-        if self.move_ema_to_online_device:
-            self.ema_model.to(get_module_device(self.online_model[0]))
-
         current_decay = self.beta
 
         for (name, current_params), (_, ma_params) in zip(
@@ -178,7 +158,7 @@ class KarrasEMA(Module):
         ):
             if not self._should_update_param(name):
                 continue
-            self.inplace_lerp(ma_params.data, current_params.data, 1.0 - current_decay)
+            inplace_lerp(ma_params.data, current_params.data, 1.0 - current_decay)
 
     def _should_update_param(self, name: str) -> bool:
         """Check if parameter should be updated based on ignore rules."""

@@ -12,6 +12,15 @@ from .karras_ema import KarrasEMA
 from .utils import sigma_rel_to_gamma, solve_weights
 
 
+def _safe_torch_load(path: str | Path, *, map_location=None):
+    """Helper function to load checkpoints with weights_only if supported."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        # Older PyTorch versions don't support weights_only
+        return torch.load(path, map_location=map_location)
+
+
 class PostHocEMA:
     """
     Post-hoc EMA implementation with simplified interface and memory management.
@@ -66,14 +75,20 @@ class PostHocEMA:
         instance = cls(checkpoint_dir=checkpoint_dir, **kwargs)
         instance.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         
-        # Initialize EMA models
+        # Create CPU copy of model for EMA initialization
+        cpu_model = deepcopy(model).cpu()
+        
+        # Initialize EMA models on CPU
         instance.ema_models = nn.ModuleList([
             KarrasEMA(
-                model,
+                cpu_model,
                 sigma_rel=sigma_rel,
                 update_every=instance.update_every,
             ) for sigma_rel in instance.sigma_rels
         ])
+        
+        # Clean up CPU model copy
+        del cpu_model
         
         return instance
 
@@ -179,6 +194,12 @@ class PostHocEMA:
         Yields:
             nn.Module: Model with synthesized EMA weights
         """
+        # Store original device and move base model to CPU
+        original_device = next(base_model.parameters()).device
+        base_model.cpu()
+        torch.cuda.empty_cache()
+
+        # Get state dict and create EMA model
         state_dict = self.state_dict(sigma_rel, step)
         ema_model = deepcopy(base_model)
         ema_model.load_state_dict(state_dict)
@@ -186,7 +207,12 @@ class PostHocEMA:
         try:
             yield ema_model
         finally:
+            # Clean up EMA model and restore base model device
+            if hasattr(ema_model, "cuda"):
+                ema_model.cpu()
             del ema_model
+            base_model.to(original_device)
+            torch.cuda.empty_cache()
 
     def state_dict(
         self,
@@ -240,7 +266,7 @@ class PostHocEMA:
         weights = weights.squeeze(-1).to(dtype=torch.float64)  # Keep in float64
 
         # Load first checkpoint to get state dict structure
-        ckpt = torch.load(str(checkpoints[0]), map_location=device)
+        ckpt = _safe_torch_load(str(checkpoints[0]), map_location=device)
         
         # Extract just the model parameters (remove EMA-specific keys)
         model_keys = {k.replace("ema_model.", ""): k for k in ckpt.keys() 
@@ -254,16 +280,16 @@ class PostHocEMA:
 
         # Combine checkpoints using solved weights
         for checkpoint, weight in zip(checkpoints, weights.tolist()):
-            ckpt_state = torch.load(str(checkpoint), map_location=device)
+            ckpt_state = _safe_torch_load(str(checkpoint), map_location=device)
             for k, v in model_keys.items():
                 # Convert checkpoint tensor to double precision
-                ckpt_tensor = ckpt_state[v].to(dtype=torch.float64)
+                ckpt_tensor = ckpt_state[v].to(dtype=torch.float64, device=device)
                 # Use double precision for accumulation
                 synth_state[k].add_(ckpt_tensor * weight)
 
         # Convert final state to target dtype
         synth_state = {
-            k: v.to(dtype=self.checkpoint_dtype)
+            k: v.to(dtype=self.checkpoint_dtype, device=device)
             for k, v in synth_state.items()
         }
 
