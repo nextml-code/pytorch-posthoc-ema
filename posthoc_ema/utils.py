@@ -12,6 +12,21 @@ def exists(val):
     return val is not None
 
 
+def beta_to_sigma_rel(beta: float) -> float:
+    """
+    Convert EMA decay rate (β) to relative standard deviation (σrel).
+
+    Args:
+        beta: EMA decay rate (e.g., 0.9999 for strong smoothing)
+
+    Returns:
+        float: Corresponding relative standard deviation
+    """
+    gamma = -np.log(beta)
+    t = 12 + 16 * gamma + 7 * gamma**2 + gamma**3
+    return float(1 / np.sqrt(t))
+
+
 def sigma_rel_to_gamma(sigma_rel: float) -> float:
     """
     Convert relative standard deviation (σrel) to gamma parameter.

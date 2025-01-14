@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from .karras_ema import KarrasEMA
-from .utils import sigma_rel_to_gamma, solve_weights
+from .utils import beta_to_sigma_rel, sigma_rel_to_gamma, solve_weights
 
 
 def _safe_torch_load(path: str | Path, *, map_location=None):
@@ -28,6 +28,7 @@ class PostHocEMA:
     Args:
         checkpoint_dir: Directory to store checkpoints
         max_checkpoints: Maximum number of checkpoints to keep per EMA model
+        betas: Tuple of EMA decay rates for the maintained EMA models
         sigma_rels: Tuple of relative standard deviations for the maintained EMA models
         update_every: Number of steps between EMA updates
         checkpoint_every: Number of steps between checkpoints
@@ -38,16 +39,27 @@ class PostHocEMA:
         self,
         checkpoint_dir: str | Path,
         max_checkpoints: int = 20,
-        sigma_rels: tuple[float, ...] = (0.05, 0.28),
+        betas: tuple[float, ...] | None = None,
+        sigma_rels: tuple[float, ...] | None = None,
         update_every: int = 10,
         checkpoint_every: int = 1000,
         checkpoint_dtype: Optional[torch.dtype] = None,
     ):
+        if betas is None and sigma_rels is None:
+            sigma_rels = (0.05, 0.28)  # Default values from paper
+        if betas is not None and sigma_rels is not None:
+            raise ValueError("Cannot specify both betas and sigma_rels")
+
         self.checkpoint_dir = Path(checkpoint_dir)
         self.max_checkpoints = max_checkpoints
         self.checkpoint_dtype = checkpoint_dtype
         self.update_every = update_every
         self.checkpoint_every = checkpoint_every
+
+        # Convert betas to sigma_rels if needed
+        if betas is not None:
+            sigma_rels = tuple(map(beta_to_sigma_rel, betas))
+
         self.sigma_rels = sigma_rels
         self.gammas = tuple(map(sigma_rel_to_gamma, sigma_rels))
         
@@ -210,7 +222,8 @@ class PostHocEMA:
     def model(
         self,
         base_model: nn.Module,
-        sigma_rel: float,
+        beta: float | None = None,
+        sigma_rel: float | None = None,
         step: int | None = None,
     ) -> Iterator[nn.Module]:
         """
@@ -218,19 +231,28 @@ class PostHocEMA:
 
         Args:
             base_model: Model to apply EMA weights to
+            beta: Target EMA decay rate (alternative to sigma_rel)
             sigma_rel: Target relative standard deviation
             step: Optional specific training step to synthesize for
 
         Yields:
             nn.Module: Model with synthesized EMA weights
         """
+        if beta is None and sigma_rel is None:
+            raise ValueError("Must specify either beta or sigma_rel")
+        if beta is not None and sigma_rel is not None:
+            raise ValueError("Cannot specify both beta and sigma_rel")
+
+        if beta is not None:
+            sigma_rel = beta_to_sigma_rel(beta)
+
         # Store original device and move base model to CPU
         original_device = next(base_model.parameters()).device
         base_model.cpu()
         torch.cuda.empty_cache()
 
         # Get state dict and create EMA model
-        with self.state_dict(sigma_rel, step) as state_dict:
+        with self.state_dict(sigma_rel=sigma_rel, step=step) as state_dict:
             ema_model = deepcopy(base_model)
             ema_model.load_state_dict(state_dict)
 
@@ -247,19 +269,29 @@ class PostHocEMA:
     @contextmanager
     def state_dict(
         self,
-        sigma_rel: float,
+        beta: float | None = None,
+        sigma_rel: float | None = None,
         step: int | None = None,
     ) -> Iterator[dict[str, torch.Tensor]]:
         """
         Context manager for getting state dict for synthesized EMA model.
 
         Args:
+            beta: Target EMA decay rate (alternative to sigma_rel)
             sigma_rel: Target relative standard deviation
             step: Optional specific training step to synthesize for
 
         Yields:
             dict[str, torch.Tensor]: State dict with synthesized weights
         """
+        if beta is None and sigma_rel is None:
+            raise ValueError("Must specify either beta or sigma_rel")
+        if beta is not None and sigma_rel is not None:
+            raise ValueError("Cannot specify both beta and sigma_rel")
+
+        if beta is not None:
+            sigma_rel = beta_to_sigma_rel(beta)
+
         # Convert target sigma_rel to gamma
         gamma = sigma_rel_to_gamma(sigma_rel)
         device = torch.device("cpu")  # Keep synthesis on CPU for memory efficiency
