@@ -24,8 +24,8 @@ TODO:
 
 - [ ] Investigate best options for saving checkpoints
 - [ ] Implement new usage
-- [ ] Add tests
-- [ ] Optimize vram usage
+- [x] Add tests
+- [x] Optimize vram usage
 - [ ] Add helper function for setting vanilla state to ema state
 
 ## Install
@@ -51,7 +51,7 @@ for _ in range(1000):
         model.weight.copy_(torch.randn_like(model.weight))
         model.bias.copy_(torch.randn_like(model.bias))
 
-    posthoc_ema.update(model)
+    posthoc_ema.update_(model)
 
 data = torch.randn(1, 512)
 predictions = model(data)
@@ -85,6 +85,13 @@ Or without model:
 posthoc_ema = PostHocEMA.from_path("posthoc-ema")
 
 ema_state_dict = posthoc_ema.state_dict(sigma_rel=0.15)
+```
+
+Set parameters to EMA state during training:
+
+```python
+with posthoc_ema.state_dict(sigma_rel=0.15) as state_dict:
+    model.load_state_dict(state_dict, strict=False)
 ```
 
 ## Citations
