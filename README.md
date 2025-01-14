@@ -1,7 +1,5 @@
 # pytorch post-hoc ema
 
-> This is a work in progress.
-
 The PyTorch Post-hoc EMA library improves neural network performance by applying Exponential Moving Average (EMA) techniques after training. This approach allows for the adjustment of EMA profiles post-training, which is crucial for optimizing model weight stabilization without predefining decay parameters.
 
 By implementing the post-hoc synthesized EMA method from Karras et al., the library offers flexibility in exploring EMA profiles' effects on training and sampling. It seamlessly integrates with PyTorch models, making it easy to enhance machine learning projects with post-hoc EMA adjustments.
@@ -23,10 +21,12 @@ New features:
 TODO:
 
 - [ ] Investigate best options for saving checkpoints
-- [ ] Implement new usage
+- [x] Implement new usage
 - [x] Add tests
 - [x] Optimize vram usage
-- [ ] Add helper function for setting vanilla state to ema state
+- [x] Add helper function for setting vanilla state to ema state
+- [x] Specify number of checkpoints to keep
+- [ ] Visualizations for error profiles etc.
 
 ## Install
 
@@ -63,11 +63,11 @@ with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
 # or without magic
 model.cpu()
 
-ema_state_dict = posthoc_ema.state_dict(sigma_rel=0.15) as state_dict:
-ema_model = deepcopy(model)
-ema_model.load_state_dict(state_dict)
-ema_predictions = ema_model(data)
-del ema_model
+with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
+    ema_model = deepcopy(model)
+    ema_model.load_state_dict(ema_state_dict)
+    ema_predictions = ema_model(data)
+    del ema_model
 ```
 
 Synthesize after training:
@@ -84,15 +84,38 @@ Or without model:
 ```python
 posthoc_ema = PostHocEMA.from_path("posthoc-ema")
 
-ema_state_dict = posthoc_ema.state_dict(sigma_rel=0.15)
+with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
+    model.load_state_dict(ema_state_dict, strict=False)
 ```
 
 Set parameters to EMA state during training:
 
 ```python
-with posthoc_ema.state_dict(sigma_rel=0.15) as state_dict:
-    model.load_state_dict(state_dict, strict=False)
+with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
+    model.load_state_dict(ema_state_dict, strict=False)
 ```
+
+## Configuration
+
+PostHocEMA provides several configuration options to customize its behavior:
+
+```python
+posthoc_ema = PostHocEMA.from_model(
+    model,
+    checkpoint_dir="path/to/checkpoints",
+    max_checkpoints=20,  # Keep last 20 checkpoints per EMA model (default=20)
+    sigma_rels=(0.05, 0.28),  # Default relative standard deviations from paper
+    update_every=10,  # Update EMA weights every 10 steps (default)
+    checkpoint_every=1000,  # Create checkpoints every 1000 steps (default)
+    checkpoint_dtype=torch.float16,  # Store checkpoints in half precision (default is no change)
+)
+```
+
+The default values are chosen based on the original paper:
+
+- `max_checkpoints=20`: The paper notes that "a few dozen snapshots is more than sufficient for a virtually perfect EMA reconstruction"
+- `sigma_rels=(0.05, 0.28)`: These correspond to γ₁=16.97 and γ₂=6.94 from the paper
+- `checkpoint_every=1000`: While the paper used 4096 steps between checkpoints, we default to more frequent checkpoints for better granularity
 
 ## Citations
 

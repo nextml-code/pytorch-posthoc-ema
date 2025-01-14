@@ -7,6 +7,28 @@ import torch.nn as nn
 
 from posthoc_ema import PostHocEMA
 
+"""
+PostHocEMA Configuration Options:
+--------------------------------
+- checkpoint_dir: Directory to store checkpoints
+- max_checkpoints: Maximum number of checkpoints to keep per EMA model (default=100)
+- sigma_rels: Relative standard deviations for EMA models (default=(0.05, 0.28))
+- update_every: Number of steps between EMA updates (default=10)
+- checkpoint_every: Number of steps between checkpoints (default=1000)
+- checkpoint_dtype: Data type for checkpoint storage (default=torch.float16)
+
+Example usage with configuration:
+--------------------------------
+posthoc_ema = PostHocEMA.from_model(
+    model,
+    checkpoint_dir="path/to/checkpoints",
+    max_checkpoints=50,  # Keep last 50 checkpoints per EMA model
+    sigma_rels=(0.15, 0.25),  # Custom relative standard deviations
+    update_every=5,  # Update EMA weights every 5 steps
+    checkpoint_every=500,  # Create checkpoints every 500 steps
+    checkpoint_dtype=torch.float32,  # Store checkpoints in full precision
+)
+"""
 
 def get_gpu_memory_usage():
     """Get current GPU memory usage in MB."""
@@ -51,12 +73,16 @@ def test_vram_usage_with_classifier():
     print(f"VRAM: {model_memory:.2f}MB")
     print(f"RAM:  {model_ram:.2f}MB")
 
-    # Initialize PostHocEMA
+    # Initialize PostHocEMA with configuration options
     save_path = Path("test_ema_checkpoint")
     posthoc_ema = PostHocEMA.from_model(
-        model, 
+        model,
         save_path,
-        checkpoint_every=10,  # More frequent checkpoints for testing
+        max_checkpoints=2,  # Keep only last 2 checkpoints per EMA model
+        sigma_rels=(0.05, 0.15),  # Custom relative standard deviations
+        update_every=1,  # Update EMA weights every step
+        checkpoint_every=5,  # Create checkpoints more frequently for testing
+        checkpoint_dtype=torch.float32,  # Store checkpoints in full precision
     )
     
     # Check memory after initialization
@@ -81,12 +107,12 @@ def test_vram_usage_with_classifier():
             )
 
     # Create some checkpoints
-    for _ in range(20):
+    for _ in range(5):  # Fewer iterations
         with torch.no_grad():
             # Simulate training updates
             for param in model.parameters():
                 param.add_(torch.randn_like(param) * 0.1)
-        posthoc_ema.update(model)
+            posthoc_ema.update_(model)
 
     # Check memory after creating checkpoints
     checkpoint_memory = get_gpu_memory_usage()
@@ -147,17 +173,27 @@ def test_vram_usage_with_classifier():
     )
 
     # Cleanup
+    model.cpu()  # Move model to CPU before deletion
     del model
     del posthoc_ema
     if save_path.exists():
         for file in save_path.glob("*"):
             file.unlink()
         save_path.rmdir()
+    
+    # Force CUDA cleanup
     torch.cuda.empty_cache()
-
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        
     # Final memory state
     final_memory = get_gpu_memory_usage()
     final_ram = get_ram_usage()
     print(f"\nFinal state after cleanup:")
     print(f"VRAM: {final_memory:.2f}MB")
     print(f"RAM:  {final_ram:.2f}MB")
+    
+    # Verify cleanup was successful
+    assert final_memory == 0, (
+        f"Failed to cleanup CUDA memory. Still using {final_memory:.2f}MB VRAM"
+    )

@@ -31,17 +31,17 @@ class PostHocEMA:
         sigma_rels: Tuple of relative standard deviations for the maintained EMA models
         update_every: Number of steps between EMA updates
         checkpoint_every: Number of steps between checkpoints
-        checkpoint_dtype: Data type for checkpoint storage
+        checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
     """
 
     def __init__(
         self,
         checkpoint_dir: str | Path,
-        max_checkpoints: int = 100,
+        max_checkpoints: int = 20,
         sigma_rels: tuple[float, ...] = (0.05, 0.28),
         update_every: int = 10,
         checkpoint_every: int = 1000,
-        checkpoint_dtype: torch.dtype = torch.float16,
+        checkpoint_dtype: Optional[torch.dtype] = None,
     ):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.max_checkpoints = max_checkpoints
@@ -113,6 +113,29 @@ class PostHocEMA:
         checkpoint_dir = Path(checkpoint_dir)
         assert checkpoint_dir.exists(), f"Checkpoint directory {checkpoint_dir} does not exist"
         
+        # Infer sigma_rels from checkpoint files if not provided
+        if "sigma_rels" not in kwargs:
+            # Find all unique indices in checkpoint files
+            indices = set()
+            for file in checkpoint_dir.glob("*.*.pt"):
+                idx = int(file.stem.split(".")[0])
+                indices.add(idx)
+            
+            # Sort indices to maintain order
+            indices = sorted(indices)
+            
+            # Load first checkpoint for each index to get sigma_rel
+            sigma_rels = []
+            for idx in indices:
+                checkpoint_file = next(checkpoint_dir.glob(f"{idx}.*.pt"))
+                checkpoint = _safe_torch_load(str(checkpoint_file))
+                sigma_rel = checkpoint.get("sigma_rel", None)
+                if sigma_rel is not None:
+                    sigma_rels.append(sigma_rel)
+            
+            if sigma_rels:
+                kwargs["sigma_rels"] = tuple(sigma_rels)
+        
         instance = cls(checkpoint_dir=checkpoint_dir, **kwargs)
         
         # Initialize EMA models if model provided
@@ -127,7 +150,7 @@ class PostHocEMA:
         
         return instance
 
-    def update(self, model: nn.Module) -> None:
+    def update_(self, model: nn.Module) -> None:
         """
         Update EMA models and create checkpoints if needed.
         
@@ -153,15 +176,22 @@ class PostHocEMA:
     def _create_checkpoint(self) -> None:
         """Create checkpoints for all EMA models."""
         for idx, ema_model in enumerate(self.ema_models):
-            filename = f"{idx}.{self.step}.pt"
-            path = self.checkpoint_dir / filename
-
-            # Save with double precision for internal checkpoints
-            state_dict = {
-                k: v.to(dtype=torch.float64)
-                for k, v in ema_model.state_dict().items()
-            }
-            torch.save(state_dict, path)
+            # Create checkpoint file
+            checkpoint_file = self.checkpoint_dir / f"{idx}.{self.step}.pt"
+            
+            # Save EMA model state with sigma_rel
+            state_dict = ema_model.state_dict()
+            state_dict["sigma_rel"] = self.sigma_rels[idx]  # Add sigma_rel to checkpoint
+            torch.save(state_dict, checkpoint_file)
+            
+            # Remove old checkpoints if needed
+            checkpoint_files = sorted(
+                self.checkpoint_dir.glob(f"{idx}.*.pt"),
+                key=lambda p: int(p.stem.split(".")[1]),
+            )
+            if len(checkpoint_files) > self.max_checkpoints:
+                for file in checkpoint_files[:-self.max_checkpoints]:
+                    file.unlink()
 
     def _cleanup_old_checkpoints(self) -> None:
         """Remove oldest checkpoints when exceeding max_checkpoints."""
@@ -200,33 +230,34 @@ class PostHocEMA:
         torch.cuda.empty_cache()
 
         # Get state dict and create EMA model
-        state_dict = self.state_dict(sigma_rel, step)
-        ema_model = deepcopy(base_model)
-        ema_model.load_state_dict(state_dict)
+        with self.state_dict(sigma_rel, step) as state_dict:
+            ema_model = deepcopy(base_model)
+            ema_model.load_state_dict(state_dict)
 
-        try:
-            yield ema_model
-        finally:
-            # Clean up EMA model and restore base model device
-            if hasattr(ema_model, "cuda"):
-                ema_model.cpu()
-            del ema_model
-            base_model.to(original_device)
-            torch.cuda.empty_cache()
+            try:
+                yield ema_model
+            finally:
+                # Clean up EMA model and restore base model device
+                if hasattr(ema_model, "cuda"):
+                    ema_model.cpu()
+                del ema_model
+                base_model.to(original_device)
+                torch.cuda.empty_cache()
 
+    @contextmanager
     def state_dict(
         self,
         sigma_rel: float,
         step: int | None = None,
-    ) -> dict[str, torch.Tensor]:
+    ) -> Iterator[dict[str, torch.Tensor]]:
         """
-        Get state dict for synthesized EMA model.
+        Context manager for getting state dict for synthesized EMA model.
 
         Args:
             sigma_rel: Target relative standard deviation
             step: Optional specific training step to synthesize for
 
-        Returns:
+        Yields:
             dict[str, torch.Tensor]: State dict with synthesized weights
         """
         # Convert target sigma_rel to gamma
@@ -239,14 +270,34 @@ class PostHocEMA:
         checkpoints = []
 
         # Collect checkpoint info
-        for idx in range(len(self.ema_models)):
+        if self.ema_models is not None:
+            # When we have ema_models, use their indices
+            indices = range(len(self.ema_models))
+        else:
+            # When loading from path, find all unique indices
+            indices = set()
+            for file in self.checkpoint_dir.glob("*.*.pt"):
+                idx = int(file.stem.split(".")[0])
+                indices.add(idx)
+            indices = sorted(indices)
+
+        # Collect checkpoint info
+        for idx in indices:
             checkpoint_files = sorted(
                 self.checkpoint_dir.glob(f"{idx}.*.pt"),
                 key=lambda p: int(p.stem.split(".")[1]),
             )
             for file in checkpoint_files:
                 _, timestep = map(int, file.stem.split("."))
-                gammas.append(self.gammas[idx])
+                # When we have ema_models, use their gammas
+                if self.ema_models is not None:
+                    gammas.append(self.gammas[idx])
+                else:
+                    # When loading from path, load gamma from checkpoint
+                    checkpoint = _safe_torch_load(str(file))
+                    sigma_rel = checkpoint.get("sigma_rel", None)
+                    if sigma_rel is not None:
+                        gammas.append(sigma_rel_to_gamma(sigma_rel))
                 timesteps.append(timestep)
                 checkpoints.append(file)
 
@@ -289,11 +340,16 @@ class PostHocEMA:
 
         # Convert final state to target dtype
         synth_state = {
-            k: v.to(dtype=self.checkpoint_dtype, device=device)
+            k: v.to(dtype=self.checkpoint_dtype if self.checkpoint_dtype is not None else v.dtype, device=device)
             for k, v in synth_state.items()
         }
 
-        return synth_state
+        try:
+            yield synth_state
+        finally:
+            # Clean up tensors
+            del synth_state
+            torch.cuda.empty_cache()
 
     def _solve_weights(
         self,

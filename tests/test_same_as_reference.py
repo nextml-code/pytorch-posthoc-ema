@@ -133,7 +133,7 @@ def test_same_output_as_reference():
 
         # Update both EMA wrappers
         ref_emas.update()
-        our_emas.update(net)
+        our_emas.update_(net)
 
         # Debug: Print state after update
         if step % 10 == 0:
