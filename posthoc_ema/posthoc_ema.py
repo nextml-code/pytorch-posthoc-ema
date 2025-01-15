@@ -191,9 +191,11 @@ class PostHocEMA:
             # Create checkpoint file
             checkpoint_file = self.checkpoint_dir / f"{idx}.{self.step}.pt"
             
-            # Save EMA model state with sigma_rel
-            state_dict = ema_model.state_dict()
-            state_dict["sigma_rel"] = self.sigma_rels[idx]  # Add sigma_rel to checkpoint
+            # Save EMA model state with correct dtype and ema_model prefix
+            state_dict = {
+                f"ema_model.{k}": v.to(self.checkpoint_dtype) if self.checkpoint_dtype is not None else v
+                for k, v in ema_model.state_dict().items()
+            }
             torch.save(state_dict, checkpoint_file)
             
             # Remove old checkpoints if needed
@@ -330,8 +332,14 @@ class PostHocEMA:
                     sigma_rel = checkpoint.get("sigma_rel", None)
                     if sigma_rel is not None:
                         gammas.append(sigma_rel_to_gamma(sigma_rel))
+                    else:
+                        # If no sigma_rel in checkpoint, use index-based gamma
+                        gammas.append(self.gammas[idx])
                 timesteps.append(timestep)
                 checkpoints.append(file)
+
+        if not gammas:
+            raise ValueError("No valid gamma values found in checkpoints")
 
         # Use latest step if not specified
         step = step if step is not None else max(timesteps)
@@ -351,29 +359,47 @@ class PostHocEMA:
         # Load first checkpoint to get state dict structure
         ckpt = _safe_torch_load(str(checkpoints[0]), map_location=device)
         
-        # Extract just the model parameters (remove EMA-specific keys)
-        model_keys = {k.replace("ema_model.", ""): k for k in ckpt.keys() 
-                     if k.startswith("ema_model.")}
-        
+        # Extract model parameters, handling both formats and filtering out internal state
+        model_keys = {}
+        for k in ckpt.keys():
+            # Skip internal EMA tracking variables
+            if k in ("initted", "step", "sigma_rel"):
+                continue
+            if k.startswith("ema_model."):
+                # Reference format: "ema_model.weight" -> "weight"
+                model_keys[k] = k.replace("ema_model.", "")
+            else:
+                # Our format: "weight" -> "weight"
+                model_keys[k] = k
+
         # Zero initialize synthesized state with double precision
-        synth_state = {
-            k: torch.zeros_like(ckpt[v], device=device, dtype=torch.float64) 
-            for k, v in model_keys.items()
-        }
+        synth_state = {}
+        for ref_key, our_key in model_keys.items():
+            if ref_key in ckpt:
+                synth_state[our_key] = torch.zeros_like(ckpt[ref_key], device=device, dtype=torch.float64)
+            elif our_key in ckpt:
+                synth_state[our_key] = torch.zeros_like(ckpt[our_key], device=device, dtype=torch.float64)
 
         # Combine checkpoints using solved weights
         for checkpoint, weight in zip(checkpoints, weights.tolist()):
             ckpt_state = _safe_torch_load(str(checkpoint), map_location=device)
-            for k, v in model_keys.items():
+            for ref_key, our_key in model_keys.items():
+                if ref_key in ckpt_state:
+                    ckpt_tensor = ckpt_state[ref_key]
+                elif our_key in ckpt_state:
+                    ckpt_tensor = ckpt_state[our_key]
+                else:
+                    continue
                 # Convert checkpoint tensor to double precision
-                ckpt_tensor = ckpt_state[v].to(dtype=torch.float64, device=device)
+                ckpt_tensor = ckpt_tensor.to(dtype=torch.float64, device=device)
                 # Use double precision for accumulation
-                synth_state[k].add_(ckpt_tensor * weight)
+                synth_state[our_key].add_(ckpt_tensor * weight)
 
-        # Convert final state to target dtype
+        # Convert final state to target dtype and filter out internal state
         synth_state = {
             k: v.to(dtype=self.checkpoint_dtype if self.checkpoint_dtype is not None else v.dtype, device=device)
             for k, v in synth_state.items()
+            if k not in ("initted", "step", "sigma_rel")  # Filter out internal state
         }
 
         try:
