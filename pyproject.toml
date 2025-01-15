@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pytorch-posthoc-ema"
-version = "0.1.0"
+version = "0.0.0"
 description = ""
 authors = ["Phil Wang <lucidrains@gmail.com>, Richard Löwenström <samedii@gmail.com>"]
 license = "MIT"

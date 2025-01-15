@@ -11,7 +11,6 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from matplotlib import pyplot as plt
 from PIL import Image
 
 from posthoc_ema.utils import (
@@ -22,6 +21,18 @@ from posthoc_ema.utils import (
     solve_weights,
 )
 
+try:
+    from matplotlib import pyplot as plt
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+def _check_matplotlib():
+    if not HAS_MATPLOTLIB:
+        raise ImportError(
+            "matplotlib is required for visualization functions. "
+            "Please install it with: pip install matplotlib"
+        )
 
 def compute_ema_profile(
     t_i: torch.Tensor,
@@ -283,7 +294,12 @@ def plot_reconstruction_errors(
 
     Returns:
         PIL Image containing the plot
+
+    Raises:
+        ImportError: If matplotlib is not installed
     """
+    _check_matplotlib()
+
     if source_betas is None and source_sigma_rels is None:
         raise ValueError("Must specify either source_betas or source_sigma_rels")
     if source_betas is not None and source_sigma_rels is not None:
