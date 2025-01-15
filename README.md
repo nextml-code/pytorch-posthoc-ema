@@ -17,16 +17,7 @@ New features:
 - Switch EMA also with PostHocEMA
 - Low VRAM usage by keeping EMA on cpu
 - Low VRAM synthesization
-
-TODO:
-
-- [ ] Investigate best options for saving checkpoints
-- [x] Implement new usage
-- [x] Add tests
-- [x] Optimize vram usage
-- [x] Add helper function for setting vanilla state to ema state
-- [x] Specify number of checkpoints to keep
-- [ ] Visualizations for error profiles etc.
+- Visualization of EMA reconstruction error
 
 ## Install
 

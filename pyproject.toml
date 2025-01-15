@@ -1,10 +1,13 @@
 [tool.poetry]
-name = "pytorch-post-hoc-ema"
+name = "pytorch-posthoc-ema"
 version = "0.1.0"
 description = ""
 authors = ["Phil Wang <lucidrains@gmail.com>, Richard Löwenström <samedii@gmail.com>"]
 license = "MIT"
 readme = "README.md"
+packages = [
+    { include = "posthoc_ema" }
+]
 
 [tool.poetry.dependencies]
 python = "^3.9"
