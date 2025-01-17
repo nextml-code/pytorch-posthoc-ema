@@ -13,6 +13,7 @@ def test_basic_usage_with_updates():
         model, 
         "posthoc-ema",
         checkpoint_every=5,  # More frequent checkpoints for testing
+        sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
 
     # Simulate training loop
@@ -36,6 +37,7 @@ def test_context_manager_helper():
         model, 
         "posthoc-ema",
         checkpoint_every=5,  # More frequent checkpoints for testing
+        sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
 
     # Update enough times to create checkpoints
@@ -61,6 +63,7 @@ def test_manual_cpu_usage():
         model, 
         "posthoc-ema",
         checkpoint_every=5,  # More frequent checkpoints for testing
+        sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
 
     # Update enough times to create checkpoints
@@ -91,6 +94,7 @@ def test_synthesize_after_training():
         model, 
         "posthoc-ema",
         checkpoint_every=5,  # More frequent checkpoints for testing
+        sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
     for _ in range(10):  # Reduced from 1000 for test speed
         with torch.no_grad():
@@ -116,6 +120,7 @@ def test_synthesize_without_model():
         model, 
         "posthoc-ema",
         checkpoint_every=5,  # More frequent checkpoints for testing
+        sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
     for _ in range(10):  # Reduced from 1000 for test speed
         with torch.no_grad():
@@ -137,6 +142,7 @@ def test_set_parameters_during_training():
         model, 
         "posthoc-ema",
         checkpoint_every=5,  # More frequent checkpoints for testing
+        sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
 
     # Update enough times to create checkpoints

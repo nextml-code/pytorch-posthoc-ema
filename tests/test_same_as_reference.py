@@ -123,8 +123,6 @@ def test_same_output_as_reference():
         # Debug: Print state before update
         if step % 10 == 0:
             print(f"\nStep {step} before update:")
-            print(f"Ref beta: {ref_emas.ema_models[0].beta:.6f}")
-            print(f"Our beta: {our_emas.ema_models[0].beta:.6f}")
             print("\nOnline model state:")
             print(f"Weight mean: {net.weight.mean():.6f}")
             print(f"Weight std: {net.weight.std():.6f}")
@@ -193,7 +191,7 @@ def test_same_output_as_reference():
         # Debug: Print synthesis details
         print("\nSynthesis details:")
         print(f"Target sigma_rel: {target_sigma}")
-        print(f"Target gamma: {ref_emas.gammas[0]:.6f}")
+        print(f"Target gamma: {sigma_rel_to_gamma(target_sigma):.6f}")
 
         # Get checkpoint info for weight solving
         device = torch.device("cpu")

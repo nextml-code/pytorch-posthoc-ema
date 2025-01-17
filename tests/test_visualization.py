@@ -1,12 +1,16 @@
 """Tests for visualization functions."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from matplotlib import pyplot as plt
 from PIL import Image
 
-from posthoc_ema.utils import beta_to_sigma_rel, sigma_rel_to_gamma
+from posthoc_ema.posthoc_ema import PostHocEMA
+from posthoc_ema.utils import sigma_rel_to_gamma
 from posthoc_ema.visualization import (
     compute_reconstruction_errors,
     plot_reconstruction_errors,
@@ -22,7 +26,7 @@ def test_compute_reconstruction_errors():
     print("Source gammas:", tuple(map(sigma_rel_to_gamma, sigma_rels)))
 
     # Compute errors
-    target_sigma_rels, errors, target_betas = compute_reconstruction_errors(
+    target_sigma_rels, errors, _ = compute_reconstruction_errors(
         sigma_rels=sigma_rels,
         target_sigma_rel_range=(0.05, 0.28),  # Range from paper
         num_target_points=50,  # More points for better precision
@@ -34,7 +38,6 @@ def test_compute_reconstruction_errors():
     # Check shapes
     assert len(target_sigma_rels) == 50
     assert len(errors) == 50
-    assert target_betas is None  # No target betas when using sigma_rel range
 
     # Check values
     assert torch.all(target_sigma_rels >= 0.05)
@@ -46,28 +49,12 @@ def test_compute_reconstruction_errors():
 def test_compute_reconstruction_errors_with_sigma_rels():
     """Test compute_reconstruction_errors with sigma_rels."""
     sigma_rels = (0.05, 0.10)  # Values from paper
-    target_sigma_rels, errors, target_betas = compute_reconstruction_errors(
+    target_sigma_rels, errors, _ = compute_reconstruction_errors(
         sigma_rels=sigma_rels,
         target_sigma_rel_range=(0.05, 0.28),  # Range from paper
     )
     assert len(target_sigma_rels) == 100  # Default num_target_points
     assert len(errors) == 100
-    assert target_betas is None  # No target betas when using sigma_rel range
-
-
-def test_compute_reconstruction_errors_with_target_beta_range():
-    """Test compute_reconstruction_errors with target_beta_range."""
-    betas = (0.9, 0.99, 0.999)
-    target_sigma_rels, errors, target_betas = compute_reconstruction_errors(
-        betas=betas,
-        target_beta_range=(0.9, 0.95),
-    )
-    assert len(target_sigma_rels) == 100  # Default num_target_points
-    assert len(errors) == 100
-    assert target_betas is not None
-    assert len(target_betas) == 100
-    assert torch.all(target_betas >= 0.9)
-    assert torch.all(target_betas <= 0.95)
 
 
 def test_plot_reconstruction_errors():
@@ -95,17 +82,7 @@ def test_reconstruction_error_with_sigma_rels():
 def test_reconstruction_error_with_defaults():
     """Test reconstruction_error with default values."""
     img = reconstruction_error(
-        sigma_rels=(0.05, 0.10),  # Must specify either betas or sigma_rels
-    )
-    assert isinstance(img, Image.Image)
-
-
-def test_reconstruction_error_with_target_beta_range():
-    """Test reconstruction_error with target_beta_range."""
-    betas = (0.9, 0.99, 0.999)
-    img = reconstruction_error(
-        betas=betas,
-        target_beta_range=(0.9, 0.95),
+        sigma_rels=(0.05, 0.10),  # Must specify sigma_rels
     )
     assert isinstance(img, Image.Image)
 
@@ -113,35 +90,15 @@ def test_reconstruction_error_with_target_beta_range():
 def test_reconstruction_error_invalid_input():
     """Test that reconstruction_error handles invalid input correctly."""
     with pytest.raises(ValueError):
-        # Test with both betas and sigma_rels
-        reconstruction_error(betas=(0.9, 0.999), sigma_rels=(0.05, 0.28))
-
-    with pytest.raises(ValueError):
-        # Test with both target ranges
-        reconstruction_error(
-            target_beta_range=(0.9, 0.999),
-            target_sigma_rel_range=(0.05, 0.28)
-        )
-
-    with pytest.raises(ValueError):
-        # Test with invalid beta range
-        reconstruction_error(target_beta_range=(0.9999, 0.9))  # Wrong order
-
-    with pytest.raises(ValueError):
-        # Test with invalid beta value
-        reconstruction_error(target_beta_range=(1.1, 0.999))  # Beta > 1
-
-    with pytest.raises(ValueError):
         # Test with invalid sigma_rel range
-        reconstruction_error(target_sigma_rel_range=(0.28, 0.05))  # Wrong order
+        reconstruction_error(
+            sigma_rels=(0.05, 0.28),
+            target_sigma_rel_range=(0.28, 0.05),  # Wrong order
+        )
 
     with pytest.raises(ValueError):
         # Test with negative sigma_rel
         reconstruction_error(sigma_rels=(-0.05, 0.28))
-
-    with pytest.raises(ValueError):
-        # Test with invalid beta
-        reconstruction_error(betas=(1.1, 0.999))  # Beta > 1
 
 
 def test_p_dot_p_debug():
@@ -161,3 +118,54 @@ def test_p_dot_p_debug():
     
     # Result should be finite
     assert torch.all(torch.isfinite(result)) 
+
+
+def test_reconstruction_error_at_source_values():
+    """Test reconstruction error specifically at source sigma_rel values."""
+    source_sigma_rels = (0.05, 0.10)
+    target_sigma_rels, errors, _ = compute_reconstruction_errors(
+        sigma_rels=source_sigma_rels,
+        target_sigma_rel_range=(0.05, 0.28),
+        num_target_points=100,
+        max_checkpoints=100,  # More checkpoints
+        update_every=5,  # More frequent updates
+        checkpoint_every=5,  # More frequent checkpoints
+    )
+
+    # Find indices closest to source sigma_rels
+    errors_at_source = []
+    for sr in source_sigma_rels:
+        idx = torch.argmin(torch.abs(target_sigma_rels - sr))
+        error = errors[idx]
+        print(f"\nError at sigma_rel={sr:.3f}: {error:.2e}")
+        print(f"Closest evaluated sigma_rel: {target_sigma_rels[idx]:.3f}")
+        errors_at_source.append(error)
+
+    # Errors should be small but not necessarily zero due to discretization and numerical precision
+    assert all(e < 1e-4 for e in errors_at_source), "Errors at source sigma_rels should be reasonably small" 
+
+
+def test_posthoc_ema_reconstruction_error(tmp_path: Path):
+    """Test that PostHocEMA.reconstruction_error runs without errors."""
+    # Create a simple model
+    model = nn.Linear(10, 10)
+    
+    # Initialize PostHocEMA
+    posthoc_ema = PostHocEMA.from_model(
+        model=model,
+        checkpoint_dir=tmp_path,
+        max_checkpoints=100,
+        update_every=5,
+        checkpoint_every=5,
+    )
+    
+    # Create some checkpoints
+    for _ in range(50):
+        # Random update to model weights
+        with torch.no_grad():
+            for param in model.parameters():
+                param.add_(torch.randn_like(param) * 0.01)
+        posthoc_ema.update_(model)
+    
+    # Call reconstruction_error
+    posthoc_ema.reconstruction_error() 

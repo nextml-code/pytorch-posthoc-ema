@@ -6,19 +6,12 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 import torch
+from PIL import Image
 from torch import nn
 
 from .karras_ema import KarrasEMA
-from .utils import beta_to_sigma_rel, sigma_rel_to_gamma, solve_weights
-
-
-def _safe_torch_load(path: str | Path, *, map_location=None):
-    """Helper function to load checkpoints with weights_only if supported."""
-    try:
-        return torch.load(path, map_location=map_location, weights_only=True)
-    except TypeError:
-        # Older PyTorch versions don't support weights_only
-        return torch.load(path, map_location=map_location)
+from .utils import _safe_torch_load, p_dot_p, sigma_rel_to_gamma, solve_weights
+from .visualization import compute_reconstruction_errors, plot_reconstruction_errors
 
 
 class PostHocEMA:
@@ -28,7 +21,6 @@ class PostHocEMA:
     Args:
         checkpoint_dir: Directory to store checkpoints
         max_checkpoints: Maximum number of checkpoints to keep per EMA model
-        betas: Tuple of EMA decay rates for the maintained EMA models
         sigma_rels: Tuple of relative standard deviations for the maintained EMA models
         update_every: Number of steps between EMA updates
         checkpoint_every: Number of steps between checkpoints
@@ -39,26 +31,19 @@ class PostHocEMA:
         self,
         checkpoint_dir: str | Path,
         max_checkpoints: int = 20,
-        betas: tuple[float, ...] | None = None,
         sigma_rels: tuple[float, ...] | None = None,
         update_every: int = 10,
         checkpoint_every: int = 1000,
         checkpoint_dtype: Optional[torch.dtype] = None,
     ):
-        if betas is None and sigma_rels is None:
+        if sigma_rels is None:
             sigma_rels = (0.05, 0.28)  # Default values from paper
-        if betas is not None and sigma_rels is not None:
-            raise ValueError("Cannot specify both betas and sigma_rels")
 
         self.checkpoint_dir = Path(checkpoint_dir)
         self.max_checkpoints = max_checkpoints
         self.checkpoint_dtype = checkpoint_dtype
         self.update_every = update_every
         self.checkpoint_every = checkpoint_every
-
-        # Convert betas to sigma_rels if needed
-        if betas is not None:
-            sigma_rels = tuple(map(beta_to_sigma_rel, betas))
 
         self.sigma_rels = sigma_rels
         self.gammas = tuple(map(sigma_rel_to_gamma, sigma_rels))
@@ -71,7 +56,11 @@ class PostHocEMA:
         cls,
         model: nn.Module,
         checkpoint_dir: str | Path,
-        **kwargs,
+        max_checkpoints: int = 20,
+        sigma_rels: tuple[float, ...] | None = None,
+        update_every: int = 10,
+        checkpoint_every: int = 1000,
+        checkpoint_dtype: Optional[torch.dtype] = None,
     ) -> PostHocEMA:
         """
         Create PostHocEMA instance from a model for training.
@@ -79,12 +68,23 @@ class PostHocEMA:
         Args:
             model: Model to create EMAs from
             checkpoint_dir: Directory to store checkpoints
-            **kwargs: Additional arguments passed to constructor
+            max_checkpoints: Maximum number of checkpoints to keep per EMA model
+            sigma_rels: Tuple of relative standard deviations for the maintained EMA models
+            update_every: Number of steps between EMA updates
+            checkpoint_every: Number of steps between checkpoints
+            checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
             
         Returns:
             PostHocEMA: Instance ready for training
         """
-        instance = cls(checkpoint_dir=checkpoint_dir, **kwargs)
+        instance = cls(
+            checkpoint_dir=checkpoint_dir,
+            max_checkpoints=max_checkpoints,
+            sigma_rels=sigma_rels,
+            update_every=update_every,
+            checkpoint_every=checkpoint_every,
+            checkpoint_dtype=checkpoint_dtype,
+        )
         instance.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         
         # Create CPU copy of model for EMA initialization
@@ -109,7 +109,11 @@ class PostHocEMA:
         cls,
         checkpoint_dir: str | Path,
         model: Optional[nn.Module] = None,
-        **kwargs,
+        max_checkpoints: int = 20,
+        sigma_rels: tuple[float, ...] | None = None,
+        update_every: int = 10,
+        checkpoint_every: int = 1000,
+        checkpoint_dtype: Optional[torch.dtype] = None,
     ) -> PostHocEMA:
         """
         Load PostHocEMA instance from checkpoint directory.
@@ -117,7 +121,11 @@ class PostHocEMA:
         Args:
             checkpoint_dir: Directory containing checkpoints
             model: Optional model for parameter structure
-            **kwargs: Additional arguments passed to constructor
+            max_checkpoints: Maximum number of checkpoints to keep per EMA model
+            sigma_rels: Tuple of relative standard deviations for the maintained EMA models
+            update_every: Number of steps between EMA updates
+            checkpoint_every: Number of steps between checkpoints
+            checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
             
         Returns:
             PostHocEMA: Instance ready for synthesis
@@ -126,7 +134,7 @@ class PostHocEMA:
         assert checkpoint_dir.exists(), f"Checkpoint directory {checkpoint_dir} does not exist"
         
         # Infer sigma_rels from checkpoint files if not provided
-        if "sigma_rels" not in kwargs:
+        if sigma_rels is None:
             # Find all unique indices in checkpoint files
             indices = set()
             for file in checkpoint_dir.glob("*.*.pt"):
@@ -137,18 +145,25 @@ class PostHocEMA:
             indices = sorted(indices)
             
             # Load first checkpoint for each index to get sigma_rel
-            sigma_rels = []
+            sigma_rels_list = []
             for idx in indices:
                 checkpoint_file = next(checkpoint_dir.glob(f"{idx}.*.pt"))
                 checkpoint = _safe_torch_load(str(checkpoint_file))
                 sigma_rel = checkpoint.get("sigma_rel", None)
                 if sigma_rel is not None:
-                    sigma_rels.append(sigma_rel)
+                    sigma_rels_list.append(sigma_rel)
             
-            if sigma_rels:
-                kwargs["sigma_rels"] = tuple(sigma_rels)
+            if sigma_rels_list:
+                sigma_rels = tuple(sigma_rels_list)
         
-        instance = cls(checkpoint_dir=checkpoint_dir, **kwargs)
+        instance = cls(
+            checkpoint_dir=checkpoint_dir,
+            max_checkpoints=max_checkpoints,
+            sigma_rels=sigma_rels,
+            update_every=update_every,
+            checkpoint_every=checkpoint_every,
+            checkpoint_dtype=checkpoint_dtype,
+        )
         
         # Initialize EMA models if model provided
         if model is not None:
@@ -224,8 +239,7 @@ class PostHocEMA:
     def model(
         self,
         base_model: nn.Module,
-        beta: float | None = None,
-        sigma_rel: float | None = None,
+        sigma_rel: float,
         step: int | None = None,
     ) -> Iterator[nn.Module]:
         """
@@ -233,21 +247,12 @@ class PostHocEMA:
 
         Args:
             base_model: Model to apply EMA weights to
-            beta: Target EMA decay rate (alternative to sigma_rel)
             sigma_rel: Target relative standard deviation
             step: Optional specific training step to synthesize for
 
         Yields:
             nn.Module: Model with synthesized EMA weights
         """
-        if beta is None and sigma_rel is None:
-            raise ValueError("Must specify either beta or sigma_rel")
-        if beta is not None and sigma_rel is not None:
-            raise ValueError("Cannot specify both beta and sigma_rel")
-
-        if beta is not None:
-            sigma_rel = beta_to_sigma_rel(beta)
-
         # Store original device and move base model to CPU
         original_device = next(base_model.parameters()).device
         base_model.cpu()
@@ -271,29 +276,19 @@ class PostHocEMA:
     @contextmanager
     def state_dict(
         self,
-        beta: float | None = None,
-        sigma_rel: float | None = None,
+        sigma_rel: float,
         step: int | None = None,
     ) -> Iterator[dict[str, torch.Tensor]]:
         """
         Context manager for getting state dict for synthesized EMA model.
 
         Args:
-            beta: Target EMA decay rate (alternative to sigma_rel)
             sigma_rel: Target relative standard deviation
             step: Optional specific training step to synthesize for
 
         Yields:
             dict[str, torch.Tensor]: State dict with synthesized weights
         """
-        if beta is None and sigma_rel is None:
-            raise ValueError("Must specify either beta or sigma_rel")
-        if beta is not None and sigma_rel is not None:
-            raise ValueError("Cannot specify both beta and sigma_rel")
-
-        if beta is not None:
-            sigma_rel = beta_to_sigma_rel(beta)
-
         # Convert target sigma_rel to gamma
         gamma = sigma_rel_to_gamma(sigma_rel)
         device = torch.device("cpu")  # Keep synthesis on CPU for memory efficiency
@@ -429,3 +424,32 @@ class PostHocEMA:
             torch.Tensor: Optimal weights for combining checkpoints
         """
         return solve_weights(t_i, gamma_i, t_r, gamma_r)
+
+    def reconstruction_error(
+        self,
+        target_sigma_rel_range: tuple[float, float] | None = None,
+    ) -> Image.Image:
+        """
+        Generate a plot showing reconstruction errors for different target sigma_rel values.
+        
+        This shows how well we can reconstruct different EMA profiles using our stored checkpoints.
+        Lower error indicates better reconstruction. The error should be minimal around the source
+        sigma_rel values, as these profiles can be reconstructed exactly.
+        
+        Args:
+            target_sigma_rel_range: Range of sigma_rel values to test (min, max).
+                                  Defaults to (0.05, 0.28) which covers common values.
+            
+        Returns:
+            PIL.Image.Image: Plot showing reconstruction errors for different sigma_rel values
+        """
+        target_sigma_rels, errors, _ = compute_reconstruction_errors(
+            sigma_rels=self.sigma_rels,
+            target_sigma_rel_range=target_sigma_rel_range,
+        )
+        
+        return plot_reconstruction_errors(
+            target_sigma_rels=target_sigma_rels,
+            errors=errors,
+            source_sigma_rels=self.sigma_rels,
+        )

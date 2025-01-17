@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch import Tensor
@@ -132,3 +134,12 @@ def solve_weights(t_i: Tensor, gamma_i: Tensor, t_r: Tensor, gamma_r: Tensor) ->
     
     # Solve linear system
     return torch.linalg.solve(A, b) 
+
+
+def _safe_torch_load(path: str | Path, *, map_location=None):
+    """Helper function to load checkpoints with weights_only if supported."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        # Older PyTorch versions don't support weights_only
+        return torch.load(path, map_location=map_location) 

@@ -6,18 +6,23 @@ By implementing the post-hoc synthesized EMA method from Karras et al., the libr
 
 This library was adapted from [ema-pytorch](https://github.com/lucidrains/ema-pytorch) by lucidrains.
 
-Why?
+The library uses `sigma_rel` (relative standard deviation) to parameterize EMA decay rates, which relates to the classical EMA decay rate `beta` as follows:
+
+```python
+beta = 0.9999  # Very slow decay -> sigma_rel ≈ 0.05
+beta = 0.999   # Medium decay   -> sigma_rel ≈ 0.15
+beta = 0.99    # Fast decay     -> sigma_rel ≈ 0.28
+```
+
+New features and changes:
 
 - Simplified or more explicit usage
 - Opinionated defaults
-
-New features:
-
 - Select number of checkpoints to keep
-- Switch EMA also with PostHocEMA
-- Low VRAM usage by keeping EMA on cpu
-- Low VRAM synthesization
-- Visualization of EMA reconstruction error
+- Allow "Switch EMA" with PostHocEMA
+- No extra VRAM usage by keeping EMA on cpu
+- No extra VRAM usage for synthesization during evaluation
+- Visualization of EMA reconstruction error before training
 
 ## Install
 
@@ -86,6 +91,12 @@ with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
     model.load_state_dict(ema_state_dict, strict=False)
 ```
 
+You can visualize how well different EMA decay rates can be reconstructed from the stored checkpoints:
+
+```python
+posthoc_ema.reconstruction_error()
+```
+
 ## Configuration
 
 PostHocEMA provides several configuration options to customize its behavior:
@@ -107,6 +118,10 @@ The default values are chosen based on the original paper:
 - `max_checkpoints=20`: The paper notes that "a few dozen snapshots is more than sufficient for a virtually perfect EMA reconstruction"
 - `sigma_rels=(0.05, 0.28)`: These correspond to γ₁=16.97 and γ₂=6.94 from the paper
 - `checkpoint_every=1000`: While the paper used 4096 steps between checkpoints, we default to more frequent checkpoints for better granularity
+
+### Relationship between sigma_rel and beta
+
+The paper introduces `sigma_rel` as an alternative parameterization to the classical EMA decay rate `beta`. You can use either parameterization by specifying `betas` or `sigma_rels` when creating the EMA. The `sigma_rel` value represents the relative standard deviation of the EMA weights, while `beta` is the classical decay rate. Lower `sigma_rel` values (or higher `beta` values) result in slower decay and more stable averages.
 
 ## Citations
 

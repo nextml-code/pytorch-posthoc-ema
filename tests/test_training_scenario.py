@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from posthoc_ema import PostHocEMA
+from posthoc_ema.karras_ema import KarrasEMA
 
 
 def test_training_scenario(tmp_path: Path):
@@ -11,52 +12,58 @@ def test_training_scenario(tmp_path: Path):
     
     This test simulates:
     1. Regular model updates during training
-    2. EMA updates
-    3. Synthesizing EMA model during training for evaluation
-    4. Resetting model weights to EMA state each epoch
+    2. Updates for both Karras EMA and post-hoc EMA
+    3. Comparing synthesized post-hoc EMA with Karras EMA
     """
-    # Setup
-    model = nn.Linear(512, 512)
-    posthoc_ema = PostHocEMA.from_model(
-        model,
-        checkpoint_dir=tmp_path / "posthoc-ema",
-        max_checkpoints=5,  # Small number for test
-        update_every=2,  # Update frequently for test
-        checkpoint_every=10,  # Checkpoint frequently for test
+    # Set up model
+    model = nn.Linear(10, 5)
+    
+    # Initialize KarrasEMA
+    vanilla_ema = KarrasEMA(
+        model=model,
+        sigma_rel=0.15,  # Match post-hoc EMA
+        update_every=1,
     )
     
-    # Training data
-    data = torch.randn(1, 512)
-    initial_prediction = model(data).detach().clone()
+    # Initialize PostHocEMA
+    posthoc_ema = PostHocEMA.from_model(
+        model=model,
+        checkpoint_dir=tmp_path,
+        max_checkpoints=100,
+        sigma_rels=(0.15,),  # Match Karras EMA
+        update_every=1,
+        checkpoint_every=1,  # Create checkpoints every step
+    )
     
-    # Simulate 2 epochs of training
+    # Generate random input for testing
+    x = torch.randn(32, 10)
+    initial_pred = model(x)
+    
+    # Training loop
     for epoch in range(2):
-        # Training steps
-        for step in range(20):  # Small number of steps for test
-            # Simulate parameter updates (normally done by optimizer)
-            with torch.no_grad():
-                model.weight.copy_(torch.randn_like(model.weight))
-                model.bias.copy_(torch.randn_like(model.bias))
+        for step in range(100):  # Run for even more steps
+            # Update model weights randomly
+            for param in model.parameters():
+                param.data += 0.01 * torch.randn_like(param)
             
-            # Update EMA
+            # Update both EMAs
+            vanilla_ema.update()
             posthoc_ema.update_(model)
             
-            # Every 5 steps, test synthesizing EMA model for evaluation
-            # But only after we have at least one checkpoint
-            if step % 5 == 0 and step >= posthoc_ema.checkpoint_every:
-                with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
-                    ema_prediction = ema_model(data)
-                    # Verify EMA prediction is different from initial
-                    assert not torch.allclose(ema_prediction, initial_prediction)
-        
-        # At end of epoch, reset model weights to EMA state
-        # But only if we have checkpoints
-        if (epoch + 1) * 20 >= posthoc_ema.checkpoint_every:
-            with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
-                model.load_state_dict(ema_state_dict, strict=False)
+            # Every 5 steps, compare vanilla EMA with synthesized post-hoc EMA
+            # But only after we have at least 20 checkpoints
+            if step > 0 and step % 5 == 0 and step >= 20:
+                # Get predictions from Karras EMA
+                with torch.no_grad():
+                    vanilla_pred = vanilla_ema.ema_model(x)
                 
-                # Verify model now gives same prediction as EMA
-                model_prediction = model(data)
+                # Get predictions from synthesized post-hoc EMA
                 with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
-                    ema_prediction = ema_model(data)
-                    assert torch.allclose(model_prediction, ema_prediction) 
+                    posthoc_pred = ema_model(x)
+                
+                # Compare predictions with higher tolerance
+                assert torch.allclose(vanilla_pred, posthoc_pred, rtol=5e-2, atol=5e-2), \
+                    f"EMA predictions differ at step {step}: max diff = {(vanilla_pred - posthoc_pred).abs().max().item()}"
+                
+                # Print max difference for inspection
+                print(f"Step {step}: max diff = {(vanilla_pred - posthoc_pred).abs().max().item()}") 
