@@ -25,6 +25,7 @@ class PostHocEMA:
         update_every: Number of steps between EMA updates
         checkpoint_every: Number of steps between checkpoints
         checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
+        only_save_diff: If True, only save parameters with requires_grad=True
     """
 
     def __init__(
@@ -35,6 +36,7 @@ class PostHocEMA:
         update_every: int = 10,
         checkpoint_every: int = 1000,
         checkpoint_dtype: Optional[torch.dtype] = None,
+        only_save_diff: bool = False,
     ):
         if sigma_rels is None:
             sigma_rels = (0.05, 0.28)  # Default values from paper
@@ -44,6 +46,7 @@ class PostHocEMA:
         self.checkpoint_dtype = checkpoint_dtype
         self.update_every = update_every
         self.checkpoint_every = checkpoint_every
+        self.only_save_diff = only_save_diff
 
         self.sigma_rels = sigma_rels
         self.gammas = tuple(map(sigma_rel_to_gamma, sigma_rels))
@@ -61,6 +64,7 @@ class PostHocEMA:
         update_every: int = 10,
         checkpoint_every: int = 1000,
         checkpoint_dtype: Optional[torch.dtype] = None,
+        only_save_diff: bool = False,
     ) -> PostHocEMA:
         """
         Create PostHocEMA instance from a model for training.
@@ -73,6 +77,7 @@ class PostHocEMA:
             update_every: Number of steps between EMA updates
             checkpoint_every: Number of steps between checkpoints
             checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
+            only_save_diff: If True, only save parameters with requires_grad=True
             
         Returns:
             PostHocEMA: Instance ready for training
@@ -84,6 +89,7 @@ class PostHocEMA:
             update_every=update_every,
             checkpoint_every=checkpoint_every,
             checkpoint_dtype=checkpoint_dtype,
+            only_save_diff=only_save_diff,
         )
         instance.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         
@@ -96,6 +102,7 @@ class PostHocEMA:
                 cpu_model,
                 sigma_rel=sigma_rel,
                 update_every=instance.update_every,
+                only_save_diff=instance.only_save_diff,
             ) for sigma_rel in instance.sigma_rels
         ])
         
@@ -114,6 +121,7 @@ class PostHocEMA:
         update_every: int = 10,
         checkpoint_every: int = 1000,
         checkpoint_dtype: Optional[torch.dtype] = None,
+        only_save_diff: bool = False,
     ) -> PostHocEMA:
         """
         Load PostHocEMA instance from checkpoint directory.
@@ -126,6 +134,7 @@ class PostHocEMA:
             update_every: Number of steps between EMA updates
             checkpoint_every: Number of steps between checkpoints
             checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
+            only_save_diff: If True, only save parameters with requires_grad=True
             
         Returns:
             PostHocEMA: Instance ready for synthesis
@@ -155,7 +164,7 @@ class PostHocEMA:
             
             if sigma_rels_list:
                 sigma_rels = tuple(sigma_rels_list)
-        
+
         instance = cls(
             checkpoint_dir=checkpoint_dir,
             max_checkpoints=max_checkpoints,
@@ -163,6 +172,7 @@ class PostHocEMA:
             update_every=update_every,
             checkpoint_every=checkpoint_every,
             checkpoint_dtype=checkpoint_dtype,
+            only_save_diff=only_save_diff,
         )
         
         # Initialize EMA models if model provided
@@ -172,6 +182,7 @@ class PostHocEMA:
                     model,
                     sigma_rel=sigma_rel,
                     update_every=instance.update_every,
+                    only_save_diff=instance.only_save_diff,
                 ) for sigma_rel in instance.sigma_rels
             ])
         
@@ -206,10 +217,32 @@ class PostHocEMA:
             # Create checkpoint file
             checkpoint_file = self.checkpoint_dir / f"{idx}.{self.step}.pt"
             
+            # Get parameter and buffer names
+            param_names = {
+                name
+                for name, param in ema_model.ema_model.named_parameters()
+            }
+            if self.only_save_diff:
+                param_names = {
+                    name for name in param_names
+                    if ema_model.ema_model.get_parameter(name).requires_grad
+                }
+            buffer_names = {
+                name
+                for name, _ in ema_model.ema_model.named_buffers()
+            }
+            
             # Save EMA model state with correct dtype and ema_model prefix
             state_dict = {
-                f"ema_model.{k}": v.to(self.checkpoint_dtype) if self.checkpoint_dtype is not None else v
+                f"ema_model.{k}": (
+                    v.to(self.checkpoint_dtype) if self.checkpoint_dtype is not None else v
+                )
                 for k, v in ema_model.state_dict().items()
+                if (
+                    k in param_names  # Include parameters based on only_save_diff
+                    or k in buffer_names  # Include all buffers
+                    or k in ("initted", "step")  # Include internal state
+                )
             }
             torch.save(state_dict, checkpoint_file)
             
@@ -369,10 +402,13 @@ class PostHocEMA:
 
         # Zero initialize synthesized state with double precision
         synth_state = {}
+        original_dtypes = {}  # Store original dtypes
         for ref_key, our_key in model_keys.items():
             if ref_key in ckpt:
+                original_dtypes[our_key] = ckpt[ref_key].dtype
                 synth_state[our_key] = torch.zeros_like(ckpt[ref_key], device=device, dtype=torch.float64)
             elif our_key in ckpt:
+                original_dtypes[our_key] = ckpt[our_key].dtype
                 synth_state[our_key] = torch.zeros_like(ckpt[our_key], device=device, dtype=torch.float64)
 
         # Combine checkpoints using solved weights
@@ -391,10 +427,43 @@ class PostHocEMA:
                 synth_state[our_key].add_(ckpt_tensor * weight)
 
         # Convert final state to target dtype and filter out internal state
+        # Only include parameters with requires_grad=True and buffers
+        if self.ema_models is not None:
+            # When we have ema_models, use their parameter names
+            param_names = {
+                name
+                for name, param in self.ema_models[0].ema_model.named_parameters()
+            }
+            if self.only_save_diff:
+                param_names = {
+                    name for name in param_names
+                    if self.ema_models[0].ema_model.get_parameter(name).requires_grad
+                }
+            buffer_names = {
+                name
+                for name, _ in self.ema_models[0].ema_model.named_buffers()
+            }
+        else:
+            # When loading from path, we can't filter by requires_grad
+            # since we don't have access to the original model
+            param_names = set()
+            buffer_names = set()
+
         synth_state = {
-            k: v.to(dtype=self.checkpoint_dtype if self.checkpoint_dtype is not None else v.dtype, device=device)
+            k: v.to(
+                dtype=(
+                    self.checkpoint_dtype if self.checkpoint_dtype is not None
+                    else original_dtypes[k]
+                ),
+                device=device
+            )
             for k, v in synth_state.items()
             if k not in ("initted", "step", "sigma_rel")  # Filter out internal state
+            and (
+                not param_names  # If we don't have param_names, include everything
+                or k in param_names  # Include parameters with requires_grad
+                or k in buffer_names  # Include all buffers
+            )
         }
 
         try:
