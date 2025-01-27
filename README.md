@@ -88,7 +88,8 @@ Set parameters to EMA state during training:
 
 ```python
 with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
-    model.load_state_dict(ema_state_dict, strict=False)
+    result = model.load_state_dict(ema_state_dict, strict=False)
+    assert len(result.unexpected_keys) == 0
 ```
 
 You can visualize how well different EMA decay rates can be reconstructed from the stored checkpoints:

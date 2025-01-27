@@ -2,5 +2,5 @@
 - Use black formatting
 - Avoid methods with sideeffects and if they are needed then add a "_" suffix
 - Prefer pathlib over os
-- Python 3.10
+- Python 3.9
 - Check your changes with `poetry run pytest -vsx`. Start by first only running specific tests to keep a high iteration speed
