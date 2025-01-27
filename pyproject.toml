@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "pytorch-posthoc-ema"
 version = "0.0.0"
-description = ""
+description = "Post-hoc EMA synthesis for PyTorch"
 authors = ["Phil Wang <lucidrains@gmail.com>, Richard Löwenström <samedii@gmail.com>"]
 license = "MIT"
 readme = "README.md"

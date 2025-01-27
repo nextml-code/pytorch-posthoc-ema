@@ -1,10 +1,6 @@
-# pytorch post-hoc ema
+# pytorch-posthoc-ema
 
-The PyTorch Post-hoc EMA library improves neural network performance by applying Exponential Moving Average (EMA) techniques after training. This approach allows for the adjustment of EMA profiles post-training, which is crucial for optimizing model weight stabilization without predefining decay parameters.
-
-By implementing the post-hoc synthesized EMA method from Karras et al., the library offers flexibility in exploring EMA profiles' effects on training and sampling. It seamlessly integrates with PyTorch models, making it easy to enhance machine learning projects with post-hoc EMA adjustments.
-
-This library was adapted from [ema-pytorch](https://github.com/lucidrains/ema-pytorch) by lucidrains.
+Choose your EMA decay rate after training. No need to decide upfront.
 
 The library uses `sigma_rel` (relative standard deviation) to parameterize EMA decay rates, which relates to the classical EMA decay rate `beta` as follows:
 
@@ -14,15 +10,17 @@ beta = 0.999   # Medium decay   -> sigma_rel ≈ 0.15
 beta = 0.99    # Fast decay     -> sigma_rel ≈ 0.28
 ```
 
+This library was adapted from [ema-pytorch](https://github.com/lucidrains/ema-pytorch) by lucidrains.
+
 New features and changes:
 
+- No extra VRAM usage by keeping EMA on cpu
+- No extra VRAM usage for EMA synthesis during evaluation
+- Low RAM usage for EMA synthesis
 - Simplified or more explicit usage
 - Opinionated defaults
 - Select number of checkpoints to keep
 - Allow "Switch EMA" with PostHocEMA
-- No extra VRAM usage by keeping EMA on cpu
-- No extra VRAM usage for synthesization during evaluation
-- Low RAM usage for synthesis
 - Visualization of EMA reconstruction error before training
 
 ## Install
@@ -31,7 +29,7 @@ New features and changes:
 poetry add pytorch-posthoc-ema
 ```
 
-## Usage
+## Basic Usage
 
 ```python
 import torch
@@ -42,7 +40,6 @@ model = torch.nn.Linear(512, 512)
 posthoc_ema = PostHocEMA.from_model(model, "posthoc-ema")
 
 for _ in range(1000):
-
     # mutate your network, normally with an optimizer
     with torch.no_grad():
         model.weight.copy_(torch.randn_like(model.weight))
@@ -56,74 +53,50 @@ predictions = model(data)
 # use the helper
 with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
     ema_predictions = ema_model(data)
-
-# or without magic
-model.cpu()
-
-with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
-    ema_model = deepcopy(model)
-    ema_model.load_state_dict(ema_state_dict)
-    ema_predictions = ema_model(data)
-    del ema_model
 ```
 
-Synthesize after training:
+### Load After Training
 
 ```python
+# With model
 posthoc_ema = PostHocEMA.from_path("posthoc-ema", model)
-
 with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
     ema_predictions = ema_model(data)
-```
 
-Or without model:
-
-```python
+# Without model
 posthoc_ema = PostHocEMA.from_path("posthoc-ema")
-
-with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
-    model.load_state_dict(ema_state_dict, strict=False)
+with posthoc_ema.state_dict(sigma_rel=0.15) as state_dict:
+    model.load_state_dict(state_dict, strict=False)
 ```
 
-Set parameters to EMA state during training:
+## Advanced Usage
+
+### Switch EMA During Training
 
 ```python
-with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
-    result = model.load_state_dict(ema_state_dict, strict=False)
-    assert len(result.unexpected_keys) == 0
+with posthoc_ema.state_dict(sigma_rel=0.15) as state_dict:
+    model.load_state_dict(state_dict, strict=False)
 ```
 
-You can visualize how well different EMA decay rates can be reconstructed from the stored checkpoints:
+### Visualize Reconstruction Quality
 
 ```python
 posthoc_ema.reconstruction_error()
 ```
 
-## Configuration
-
-PostHocEMA provides several configuration options to customize its behavior:
+### Configuration
 
 ```python
 posthoc_ema = PostHocEMA.from_model(
     model,
     checkpoint_dir="path/to/checkpoints",
-    max_checkpoints=20,  # Keep last 20 checkpoints per EMA model (default=20)
+    max_checkpoints=20,  # Keep last 20 checkpoints per EMA model
     sigma_rels=(0.05, 0.28),  # Default relative standard deviations from paper
-    update_every=10,  # Update EMA weights every 10 steps (default)
-    checkpoint_every=1000,  # Create checkpoints every 1000 steps (default)
-    checkpoint_dtype=torch.float16,  # Store checkpoints in half precision (default is no change)
+    update_every=10,  # Update EMA weights every 10 steps
+    checkpoint_every=1000,  # Create checkpoints every 1000 steps
+    checkpoint_dtype=torch.float16,  # Store checkpoints in half precision
 )
 ```
-
-The default values are chosen based on the original paper:
-
-- `max_checkpoints=20`: The paper notes that "a few dozen snapshots is more than sufficient for a virtually perfect EMA reconstruction"
-- `sigma_rels=(0.05, 0.28)`: These correspond to γ₁=16.97 and γ₂=6.94 from the paper
-- `checkpoint_every=1000`: While the paper used 4096 steps between checkpoints, we default to more frequent checkpoints for better granularity
-
-### Relationship between sigma_rel and beta
-
-The paper introduces `sigma_rel` as an alternative parameterization to the classical EMA decay rate `beta`. You can use either parameterization by specifying `betas` or `sigma_rels` when creating the EMA. The `sigma_rel` value represents the relative standard deviation of the EMA weights, while `beta` is the classical decay rate. Lower `sigma_rel` values (or higher `beta` values) result in slower decay and more stable averages.
 
 ## Citations
 
@@ -133,8 +106,7 @@ The paper introduces `sigma_rel` as an alternative parameterization to the class
     author  = {Tero Karras and Miika Aittala and Jaakko Lehtinen and Janne Hellsten and Timo Aila and Samuli Laine},
     journal = {ArXiv},
     year    = {2023},
-    volume  = {abs/2312.02696},
-    url     = {https://api.semanticscholar.org/CorpusID:265659032}
+    volume  = {abs/2312.02696}
 }
 ```
 
@@ -144,8 +116,7 @@ The paper introduces `sigma_rel` as an alternative parameterization to the class
     author  = {Hojoon Lee and Hyeonseo Cho and Hyunseung Kim and Donghu Kim and Dugki Min and Jaegul Choo and Clare Lyle},
     journal = {ArXiv},
     year    = {2024},
-    volume  = {abs/2406.02596},
-    url     = {https://api.semanticscholar.org/CorpusID:270258586}
+    volume  = {abs/2406.02596}
 }
 ```
 
@@ -155,7 +126,6 @@ The paper introduces `sigma_rel` as an alternative parameterization to the class
     author  = {Siyuan Li and Zicheng Liu and Juanxi Tian and Ge Wang and Zedong Wang and Weiyang Jin and Di Wu and Cheng Tan and Tao Lin and Yang Liu and Baigui Sun and Stan Z. Li},
     journal = {ArXiv},
     year    = {2024},
-    volume  = {abs/2402.09240},
-    url     = {https://api.semanticscholar.org/CorpusID:267657558}
+    volume  = {abs/2402.09240}
 }
 ```
