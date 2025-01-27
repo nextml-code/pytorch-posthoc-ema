@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Generator
 
 import torch
 from PIL import Image
@@ -285,41 +285,41 @@ class PostHocEMA:
 
     @contextmanager
     def model(
-        self,
-        base_model: nn.Module,
-        sigma_rel: float,
-        step: int | None = None,
-    ) -> Iterator[nn.Module]:
-        """
-        Context manager for using synthesized EMA model.
+        self, model: nn.Module, sigma_rel: float
+    ) -> Generator[nn.Module, None, None]:
+        """Context manager that temporarily sets model parameters to EMA state.
 
         Args:
-            base_model: Model to apply EMA weights to
+            model: Model to update
             sigma_rel: Target relative standard deviation
-            step: Optional specific training step to synthesize for
 
-        Yields:
-            nn.Module: Model with synthesized EMA weights
+        Returns:
+            Model with EMA parameters
         """
-        # Store original device and move base model to CPU
-        original_device = next(base_model.parameters()).device
-        base_model.cpu()
+        # Store original device and move model to CPU
+        original_device = next(model.parameters()).device
+        model.cpu()
         torch.cuda.empty_cache()
 
-        # Get state dict and create EMA model
-        with self.state_dict(sigma_rel=sigma_rel, step=step) as state_dict:
-            ema_model = deepcopy(base_model)
-            ema_model.load_state_dict(state_dict)
-
-            try:
+        try:
+            with self.state_dict(sigma_rel=sigma_rel) as state_dict:
+                ema_model = deepcopy(model)
+                result = ema_model.load_state_dict(
+                    state_dict, strict=not self.only_save_diff
+                )
+                assert (
+                    len(result.unexpected_keys) == 0
+                ), f"Unexpected keys: {result.unexpected_keys}"
+                ema_model.eval()  # Set to eval mode to handle BatchNorm
                 yield ema_model
-            finally:
-                # Clean up EMA model and restore base model device
+                # Clean up EMA model
                 if hasattr(ema_model, "cuda"):
                     ema_model.cpu()
                 del ema_model
-                base_model.to(original_device)
-                torch.cuda.empty_cache()
+        finally:
+            # Restore model to original device
+            model.to(original_device)
+            torch.cuda.empty_cache()
 
     @contextmanager
     def state_dict(

@@ -80,34 +80,18 @@ def p_dot_p(t_a: Tensor, gamma_a: Tensor, t_b: Tensor, gamma_b: Tensor) -> Tenso
     t_ratio = torch.where(
         (t_a == 0) & (t_b == 0),
         torch.ones_like(t_a),
-        t_a / torch.where(t_b == 0, torch.ones_like(t_b), t_b)
+        t_a / torch.where(t_b == 0, torch.ones_like(t_b), t_b),
     )
-    
+
     t_exp = torch.where(t_a < t_b, gamma_b, -gamma_a)
     t_max = torch.maximum(t_a, t_b)
-    
+
     # Handle t=0 case: if both times are 0, max is 1
-    t_max = torch.where(
-        (t_a == 0) & (t_b == 0),
-        torch.ones_like(t_max),
-        t_max
-    )
-    
-    # Print debug info for first few values
-    if t_a.shape[0] < 10:  # Only print for small tensors
-        print(f"\nt_ratio shape: {t_ratio.shape}")
-        print(f"t_ratio first few: {t_ratio[:5, :5]}")
-        print(f"t_exp first few: {t_exp[:5, :5]}")
-        print(f"t_max first few: {t_max[:5, :5]}")
-    
+    t_max = torch.where((t_a == 0) & (t_b == 0), torch.ones_like(t_max), t_max)
+
     num = (gamma_a + 1) * (gamma_b + 1) * t_ratio**t_exp
     den = (gamma_a + gamma_b + 1) * t_max
-    
-    if t_a.shape[0] < 10:  # Only print for small tensors
-        print(f"num first few: {num[:5, :5]}")
-        print(f"den first few: {den[:5, :5]}")
-        print(f"result first few: {(num/den)[:5, :5]}")
-    
+
     return num / den
 
 
@@ -127,13 +111,13 @@ def solve_weights(t_i: Tensor, gamma_i: Tensor, t_r: Tensor, gamma_r: Tensor) ->
     # Reshape tensors for matrix operations
     rv = lambda x: x.reshape(-1, 1)  # Column vector
     cv = lambda x: x.reshape(1, -1)  # Row vector
-    
+
     # Compute matrices A and b using p_dot_p
     A = p_dot_p(rv(t_i), rv(gamma_i), cv(t_i), cv(gamma_i))
     b = p_dot_p(rv(t_i), rv(gamma_i), cv(t_r), cv(gamma_r))
-    
+
     # Solve linear system
-    return torch.linalg.solve(A, b) 
+    return torch.linalg.solve(A, b)
 
 
 def _safe_torch_load(path: str | Path, *, map_location=None):
@@ -142,4 +126,4 @@ def _safe_torch_load(path: str | Path, *, map_location=None):
         return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
         # Older PyTorch versions don't support weights_only
-        return torch.load(path, map_location=map_location) 
+        return torch.load(path, map_location=map_location)
