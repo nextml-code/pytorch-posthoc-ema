@@ -17,7 +17,7 @@ from .visualization import compute_reconstruction_errors, plot_reconstruction_er
 class PostHocEMA:
     """
     Post-hoc EMA implementation with simplified interface and memory management.
-    
+
     Args:
         checkpoint_dir: Directory to store checkpoints
         max_checkpoints: Maximum number of checkpoints to keep per EMA model
@@ -50,7 +50,7 @@ class PostHocEMA:
 
         self.sigma_rels = sigma_rels
         self.gammas = tuple(map(sigma_rel_to_gamma, sigma_rels))
-        
+
         self.step = 0
         self.ema_models = None
 
@@ -68,7 +68,7 @@ class PostHocEMA:
     ) -> PostHocEMA:
         """
         Create PostHocEMA instance from a model for training.
-        
+
         Args:
             model: Model to create EMAs from
             checkpoint_dir: Directory to store checkpoints
@@ -78,7 +78,7 @@ class PostHocEMA:
             checkpoint_every: Number of steps between checkpoints
             checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
             only_save_diff: If True, only save parameters with requires_grad=True
-            
+
         Returns:
             PostHocEMA: Instance ready for training
         """
@@ -92,24 +92,35 @@ class PostHocEMA:
             only_save_diff=only_save_diff,
         )
         instance.checkpoint_dir.mkdir(exist_ok=True, parents=True)
-        
-        # Create CPU copy of model for EMA initialization
-        cpu_model = deepcopy(model).cpu()
-        
-        # Initialize EMA models on CPU
-        instance.ema_models = nn.ModuleList([
-            KarrasEMA(
-                cpu_model,
-                sigma_rel=sigma_rel,
-                update_every=instance.update_every,
-                only_save_diff=instance.only_save_diff,
-            ) for sigma_rel in instance.sigma_rels
-        ])
-        
-        # Clean up CPU model copy
-        del cpu_model
-        
-        return instance
+
+        # Store original device
+        original_device = next(model.parameters()).device
+
+        # Move model to CPU before copying to avoid VRAM spike
+        model.cpu()
+
+        try:
+            # Initialize EMA models on CPU
+            instance.ema_models = nn.ModuleList(
+                [
+                    KarrasEMA(
+                        model,
+                        sigma_rel=sigma_rel,
+                        update_every=instance.update_every,
+                        only_save_diff=instance.only_save_diff,
+                    )
+                    for sigma_rel in instance.sigma_rels
+                ]
+            )
+
+            # Move model back to original device
+            model.to(original_device)
+
+            return instance
+        except:
+            # Ensure model is moved back even if initialization fails
+            model.to(original_device)
+            raise
 
     @classmethod
     def from_path(
@@ -125,7 +136,7 @@ class PostHocEMA:
     ) -> PostHocEMA:
         """
         Load PostHocEMA instance from checkpoint directory.
-        
+
         Args:
             checkpoint_dir: Directory containing checkpoints
             model: Optional model for parameter structure
@@ -135,13 +146,15 @@ class PostHocEMA:
             checkpoint_every: Number of steps between checkpoints
             checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
             only_save_diff: If True, only save parameters with requires_grad=True
-            
+
         Returns:
             PostHocEMA: Instance ready for synthesis
         """
         checkpoint_dir = Path(checkpoint_dir)
-        assert checkpoint_dir.exists(), f"Checkpoint directory {checkpoint_dir} does not exist"
-        
+        assert (
+            checkpoint_dir.exists()
+        ), f"Checkpoint directory {checkpoint_dir} does not exist"
+
         # Infer sigma_rels from checkpoint files if not provided
         if sigma_rels is None:
             # Find all unique indices in checkpoint files
@@ -149,10 +162,10 @@ class PostHocEMA:
             for file in checkpoint_dir.glob("*.*.pt"):
                 idx = int(file.stem.split(".")[0])
                 indices.add(idx)
-            
+
             # Sort indices to maintain order
             indices = sorted(indices)
-            
+
             # Load first checkpoint for each index to get sigma_rel
             sigma_rels_list = []
             for idx in indices:
@@ -161,7 +174,7 @@ class PostHocEMA:
                 sigma_rel = checkpoint.get("sigma_rel", None)
                 if sigma_rel is not None:
                     sigma_rels_list.append(sigma_rel)
-            
+
             if sigma_rels_list:
                 sigma_rels = tuple(sigma_rels_list)
 
@@ -174,24 +187,27 @@ class PostHocEMA:
             checkpoint_dtype=checkpoint_dtype,
             only_save_diff=only_save_diff,
         )
-        
+
         # Initialize EMA models if model provided
         if model is not None:
-            instance.ema_models = nn.ModuleList([
-                KarrasEMA(
-                    model,
-                    sigma_rel=sigma_rel,
-                    update_every=instance.update_every,
-                    only_save_diff=instance.only_save_diff,
-                ) for sigma_rel in instance.sigma_rels
-            ])
-        
+            instance.ema_models = nn.ModuleList(
+                [
+                    KarrasEMA(
+                        model,
+                        sigma_rel=sigma_rel,
+                        update_every=instance.update_every,
+                        only_save_diff=instance.only_save_diff,
+                    )
+                    for sigma_rel in instance.sigma_rels
+                ]
+            )
+
         return instance
 
     def update_(self, model: nn.Module) -> None:
         """
         Update EMA models and create checkpoints if needed.
-        
+
         Args:
             model: Current state of the model to update EMAs with
         """
@@ -216,26 +232,25 @@ class PostHocEMA:
         for idx, ema_model in enumerate(self.ema_models):
             # Create checkpoint file
             checkpoint_file = self.checkpoint_dir / f"{idx}.{self.step}.pt"
-            
+
             # Get parameter and buffer names
             param_names = {
-                name
-                for name, param in ema_model.ema_model.named_parameters()
+                name for name, param in ema_model.ema_model.named_parameters()
             }
             if self.only_save_diff:
                 param_names = {
-                    name for name in param_names
+                    name
+                    for name in param_names
                     if ema_model.ema_model.get_parameter(name).requires_grad
                 }
-            buffer_names = {
-                name
-                for name, _ in ema_model.ema_model.named_buffers()
-            }
-            
+            buffer_names = {name for name, _ in ema_model.ema_model.named_buffers()}
+
             # Save EMA model state with correct dtype and ema_model prefix
             state_dict = {
                 f"ema_model.{k}": (
-                    v.to(self.checkpoint_dtype) if self.checkpoint_dtype is not None else v
+                    v.to(self.checkpoint_dtype)
+                    if self.checkpoint_dtype is not None
+                    else v
                 )
                 for k, v in ema_model.state_dict().items()
                 if (
@@ -245,14 +260,14 @@ class PostHocEMA:
                 )
             }
             torch.save(state_dict, checkpoint_file)
-            
+
             # Remove old checkpoints if needed
             checkpoint_files = sorted(
                 self.checkpoint_dir.glob(f"{idx}.*.pt"),
                 key=lambda p: int(p.stem.split(".")[1]),
             )
             if len(checkpoint_files) > self.max_checkpoints:
-                for file in checkpoint_files[:-self.max_checkpoints]:
+                for file in checkpoint_files[: -self.max_checkpoints]:
                     file.unlink()
 
     def _cleanup_old_checkpoints(self) -> None:
@@ -386,7 +401,7 @@ class PostHocEMA:
 
         # Load first checkpoint to get state dict structure
         ckpt = _safe_torch_load(str(checkpoints[0]), map_location=device)
-        
+
         # Extract model parameters, handling both formats and filtering out internal state
         model_keys = {}
         for k in ckpt.keys():
@@ -406,10 +421,14 @@ class PostHocEMA:
         for ref_key, our_key in model_keys.items():
             if ref_key in ckpt:
                 original_dtypes[our_key] = ckpt[ref_key].dtype
-                synth_state[our_key] = torch.zeros_like(ckpt[ref_key], device=device, dtype=torch.float64)
+                synth_state[our_key] = torch.zeros_like(
+                    ckpt[ref_key], device=device, dtype=torch.float64
+                )
             elif our_key in ckpt:
                 original_dtypes[our_key] = ckpt[our_key].dtype
-                synth_state[our_key] = torch.zeros_like(ckpt[our_key], device=device, dtype=torch.float64)
+                synth_state[our_key] = torch.zeros_like(
+                    ckpt[our_key], device=device, dtype=torch.float64
+                )
 
         # Combine checkpoints using solved weights
         for checkpoint, weight in zip(checkpoints, weights.tolist()):
@@ -431,17 +450,16 @@ class PostHocEMA:
         if self.ema_models is not None:
             # When we have ema_models, use their parameter names
             param_names = {
-                name
-                for name, param in self.ema_models[0].ema_model.named_parameters()
+                name for name, param in self.ema_models[0].ema_model.named_parameters()
             }
             if self.only_save_diff:
                 param_names = {
-                    name for name in param_names
+                    name
+                    for name in param_names
                     if self.ema_models[0].ema_model.get_parameter(name).requires_grad
                 }
             buffer_names = {
-                name
-                for name, _ in self.ema_models[0].ema_model.named_buffers()
+                name for name, _ in self.ema_models[0].ema_model.named_buffers()
             }
         else:
             # When loading from path, we can't filter by requires_grad
@@ -452,10 +470,11 @@ class PostHocEMA:
         synth_state = {
             k: v.to(
                 dtype=(
-                    self.checkpoint_dtype if self.checkpoint_dtype is not None
+                    self.checkpoint_dtype
+                    if self.checkpoint_dtype is not None
                     else original_dtypes[k]
                 ),
-                device=device
+                device=device,
             )
             for k, v in synth_state.items()
             if k not in ("initted", "step", "sigma_rel")  # Filter out internal state
@@ -482,13 +501,13 @@ class PostHocEMA:
     ) -> torch.Tensor:
         """
         Solve for optimal weights to synthesize target EMA profile.
-        
+
         Args:
             t_i: Timesteps of stored checkpoints
             gamma_i: Gamma values of stored checkpoints
             t_r: Target timestep
             gamma_r: Target gamma value
-            
+
         Returns:
             torch.Tensor: Optimal weights for combining checkpoints
         """
@@ -500,15 +519,15 @@ class PostHocEMA:
     ) -> Image.Image:
         """
         Generate a plot showing reconstruction errors for different target sigma_rel values.
-        
+
         This shows how well we can reconstruct different EMA profiles using our stored checkpoints.
         Lower error indicates better reconstruction. The error should be minimal around the source
         sigma_rel values, as these profiles can be reconstructed exactly.
-        
+
         Args:
             target_sigma_rel_range: Range of sigma_rel values to test (min, max).
                                   Defaults to (0.05, 0.28) which covers common values.
-            
+
         Returns:
             PIL.Image.Image: Plot showing reconstruction errors for different sigma_rel values
         """
@@ -516,7 +535,7 @@ class PostHocEMA:
             sigma_rels=self.sigma_rels,
             target_sigma_rel_range=target_sigma_rel_range,
         )
-        
+
         return plot_reconstruction_errors(
             target_sigma_rels=target_sigma_rels,
             errors=errors,

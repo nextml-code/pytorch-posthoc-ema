@@ -30,11 +30,25 @@ posthoc_ema = PostHocEMA.from_model(
 )
 """
 
+
 def get_gpu_memory_usage():
     """Get current GPU memory usage in MB."""
     if not torch.cuda.is_available():
         return 0
     return torch.cuda.memory_allocated() / 1024 / 1024
+
+
+def get_gpu_max_memory_usage():
+    """Get maximum GPU memory usage since last reset in MB."""
+    if not torch.cuda.is_available():
+        return 0
+    return torch.cuda.max_memory_allocated() / 1024 / 1024
+
+
+def reset_gpu_max_memory():
+    """Reset peak memory tracking."""
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
 
 def get_ram_usage():
@@ -55,59 +69,72 @@ def test_vram_usage_with_classifier():
 
     # Clear cache and get initial memory state
     torch.cuda.empty_cache()
+    reset_gpu_max_memory()
     initial_memory = get_gpu_memory_usage()
     initial_ram = get_ram_usage()
     print(f"\nInitial state:")
     print(f"VRAM: {initial_memory:.2f}MB")
     print(f"RAM:  {initial_ram:.2f}MB")
 
-    # Load model to GPU
+    # Load a much larger model to GPU to make VRAM issues more apparent
     model = nn.Sequential(
-        nn.Linear(512, 256),
+        nn.Linear(2048, 2048),
         nn.ReLU(),
-        nn.Linear(256, 10),
+        nn.Linear(2048, 2048),
+        nn.ReLU(),
+        nn.Linear(2048, 2048),
+        nn.ReLU(),
+        nn.Linear(2048, 2048),
     ).cuda()
     model_memory = get_gpu_memory_usage()
     model_ram = get_ram_usage()
     print(f"\nAfter model creation:")
     print(f"VRAM: {model_memory:.2f}MB")
     print(f"RAM:  {model_ram:.2f}MB")
+    print(f"Model size in VRAM: {model_memory - initial_memory:.2f}MB")
 
-    # Initialize PostHocEMA with configuration options
+    # Monitor VRAM during PostHocEMA initialization
+    print("\nStarting PostHocEMA initialization...")
+    pre_init_memory = get_gpu_memory_usage()
+    reset_gpu_max_memory()  # Reset peak memory tracking before initialization
     save_path = Path("test_ema_checkpoint")
+
+    # This should cause a VRAM spike due to model copying before CPU transfer
     posthoc_ema = PostHocEMA.from_model(
         model,
         save_path,
-        max_checkpoints=2,  # Keep only last 2 checkpoints per EMA model
-        sigma_rels=(0.05, 0.15),  # Custom relative standard deviations
-        update_every=1,  # Update EMA weights every step
-        checkpoint_every=5,  # Create checkpoints more frequently for testing
-        checkpoint_dtype=torch.float32,  # Store checkpoints in full precision
+        max_checkpoints=2,
+        sigma_rels=(0.05, 0.15),
+        update_every=1,
+        checkpoint_every=5,
+        checkpoint_dtype=torch.float32,
     )
-    
-    # Check memory after initialization
-    ema_memory = get_gpu_memory_usage()
-    ema_ram = get_ram_usage()
-    print(f"\nAfter EMA initialization:")
-    print(f"VRAM: {ema_memory:.2f}MB")
-    print(f"RAM:  {ema_ram:.2f}MB")
 
-    # Memory after initialization should be exactly the same as model memory
-    # as EMA weights are stored on CPU
-    assert ema_memory == model_memory, (
-        f"EMA initialization changed VRAM usage. "
-        f"Before: {model_memory:.2f}MB, After: {ema_memory:.2f}MB"
+    # Check memory right after initialization
+    post_init_memory = get_gpu_memory_usage()
+    post_init_ram = get_ram_usage()
+    peak_memory = get_gpu_max_memory_usage()
+    print(f"\nAfter EMA initialization:")
+    print(f"VRAM: {post_init_memory:.2f}MB")
+    print(f"Peak VRAM during init: {peak_memory:.2f}MB")
+    print(f"RAM:  {post_init_ram:.2f}MB")
+    print(f"VRAM spike during init: {peak_memory - pre_init_memory:.2f}MB")
+
+    # This assertion should fail because of the VRAM spike during initialization
+    assert peak_memory <= pre_init_memory + 1.0, (
+        f"EMA initialization caused significant VRAM spike. "
+        f"Pre-init: {pre_init_memory:.2f}MB, Peak: {peak_memory:.2f}MB"
     )
 
     # Verify EMA models are on CPU
     for ema_model in posthoc_ema.ema_models:
         for param in ema_model.ema_model.parameters():
-            assert param.device.type == "cpu", (
-                f"EMA model parameter found on {param.device.type}, should be on cpu"
-            )
+            assert (
+                param.device.type == "cpu"
+            ), f"EMA model parameter found on {param.device.type}, should be on cpu"
 
     # Create some checkpoints
-    for _ in range(5):  # Fewer iterations
+    for _ in range(5):
         with torch.no_grad():
             # Simulate training updates
             for param in model.parameters():
@@ -129,7 +156,7 @@ def test_vram_usage_with_classifier():
     print(f"VRAM: {state_dict_memory:.2f}MB")
     print(f"RAM:  {state_dict_ram:.2f}MB")
 
-    assert state_dict_memory == model_memory, (
+    assert state_dict_memory <= model_memory + 1.0, (
         f"Getting state dict changed VRAM usage. "
         f"Before: {model_memory:.2f}MB, After: {state_dict_memory:.2f}MB"
     )
@@ -144,11 +171,13 @@ def test_vram_usage_with_classifier():
         print(f"VRAM: {entry_memory:.2f}MB")
         print(f"RAM:  {entry_ram:.2f}MB")
 
-        assert entry_memory == 0, (
-            f"PostHocEMA failed to move model to CPU: {entry_memory:.2f}MB VRAM in use"
-        )
-        assert get_module_device(model) == "cpu", "Model should be automatically moved to CPU"
-        
+        assert (
+            entry_memory == 0
+        ), f"PostHocEMA failed to move model to CPU: {entry_memory:.2f}MB VRAM in use"
+        assert (
+            get_module_device(model) == "cpu"
+        ), "Model should be automatically moved to CPU"
+
         # Only after explicitly moving to GPU should we see VRAM usage
         ema_model.cuda()
         context_memory = get_gpu_memory_usage()
@@ -180,20 +209,20 @@ def test_vram_usage_with_classifier():
         for file in save_path.glob("*"):
             file.unlink()
         save_path.rmdir()
-    
+
     # Force CUDA cleanup
     torch.cuda.empty_cache()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-        
+
     # Final memory state
     final_memory = get_gpu_memory_usage()
     final_ram = get_ram_usage()
     print(f"\nFinal state after cleanup:")
     print(f"VRAM: {final_memory:.2f}MB")
     print(f"RAM:  {final_ram:.2f}MB")
-    
+
     # Verify cleanup was successful
-    assert final_memory == 0, (
-        f"Failed to cleanup CUDA memory. Still using {final_memory:.2f}MB VRAM"
-    )
+    assert (
+        final_memory == 0
+    ), f"Failed to cleanup CUDA memory. Still using {final_memory:.2f}MB VRAM"

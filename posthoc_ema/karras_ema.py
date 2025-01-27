@@ -92,39 +92,52 @@ class KarrasEMA(Module):
         if callable(ema_model) and not isinstance(ema_model, Module):
             ema_model = ema_model()
 
-        # Create EMA model on CPU
-        self.ema_model = (ema_model if exists(ema_model) else deepcopy(model)).cpu()
+        # Store original device
+        original_device = next(model.parameters()).device
 
-        # Ensure all parameters and buffers are on CPU and detached
-        for p in self.ema_model.parameters():
-            p.data = p.data.cpu().detach()
-        for b in self.ema_model.buffers():
-            b.data = b.data.cpu().detach()
+        # Move model to CPU before copying to avoid VRAM spike
+        model.cpu()
 
-        # Get parameter names that require gradients
-        self.param_names = {
-            name
-            for name, param in self.ema_model.named_parameters()
-            if (not only_save_diff or param.requires_grad) and (
-                torch.is_floating_point(param) or torch.is_complex(param)
-            )
-        }
+        try:
+            # Create EMA model on CPU
+            self.ema_model = (ema_model if exists(ema_model) else deepcopy(model)).cpu()
 
-        # Get buffer names for floating point or complex buffers
-        self.buffer_names = {
-            name
-            for name, buffer in self.ema_model.named_buffers()
-            if torch.is_floating_point(buffer) or torch.is_complex(buffer)
-        }
+            # Ensure all parameters and buffers are on CPU and detached
+            for p in self.ema_model.parameters():
+                p.data = p.data.cpu().detach()
+            for b in self.ema_model.buffers():
+                b.data = b.data.cpu().detach()
 
-        # Names to ignore
-        self.param_or_buffer_names_no_ema = param_or_buffer_names_no_ema
-        self.ignore_names = ignore_names
-        self.ignore_startswith_names = ignore_startswith_names
+            # Move model back to original device
+            model.to(original_device)
 
-        # State buffers on CPU
-        self.register_buffer("initted", torch.tensor(False, device="cpu"))
-        self.register_buffer("step", torch.tensor(0, device="cpu"))
+            # Get parameter names that require gradients
+            self.param_names = {
+                name
+                for name, param in self.ema_model.named_parameters()
+                if (not only_save_diff or param.requires_grad)
+                and (torch.is_floating_point(param) or torch.is_complex(param))
+            }
+
+            # Get buffer names for floating point or complex buffers
+            self.buffer_names = {
+                name
+                for name, buffer in self.ema_model.named_buffers()
+                if torch.is_floating_point(buffer) or torch.is_complex(buffer)
+            }
+
+            # Names to ignore
+            self.param_or_buffer_names_no_ema = param_or_buffer_names_no_ema
+            self.ignore_names = ignore_names
+            self.ignore_startswith_names = ignore_startswith_names
+
+            # State buffers on CPU
+            self.register_buffer("initted", torch.tensor(False, device="cpu"))
+            self.register_buffer("step", torch.tensor(0, device="cpu"))
+        except:
+            # Ensure model is moved back even if initialization fails
+            model.to(original_device)
+            raise
 
     @property
     def beta(self):
@@ -239,23 +252,23 @@ class KarrasEMA(Module):
     def state_dict(self):
         """Get state dict of EMA model."""
         state_dict = {}
-        
+
         # Add parameters based on only_save_diff flag
         for name, param in self.ema_model.named_parameters():
             if (not self.only_save_diff or param.requires_grad) and (
                 torch.is_floating_point(param) or torch.is_complex(param)
             ):
                 state_dict[name] = param
-        
+
         # Add buffers (always included regardless of only_save_diff)
         for name, buffer in self.ema_model.named_buffers():
             if torch.is_floating_point(buffer) or torch.is_complex(buffer):
                 state_dict[name] = buffer
-        
+
         # Add internal state
         state_dict["initted"] = self.initted
         state_dict["step"] = self.step
-        
+
         return state_dict
 
     def load_state_dict(self, state_dict):
@@ -264,12 +277,12 @@ class KarrasEMA(Module):
         for name, param in self.ema_model.named_parameters():
             if (not self.only_save_diff or param.requires_grad) and name in state_dict:
                 param.data.copy_(state_dict[name].data)
-        
+
         # Load buffers
         for name, buffer in self.ema_model.named_buffers():
             if name in state_dict:
                 buffer.data.copy_(state_dict[name].data)
-        
+
         # Load internal state
         if "initted" in state_dict:
             self.initted.data.copy_(state_dict["initted"].data)
