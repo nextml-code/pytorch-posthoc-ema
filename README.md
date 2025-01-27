@@ -26,6 +26,12 @@ New features and changes:
 ## Install
 
 ```bash
+pip install pytorch-posthoc-ema
+```
+
+or
+
+```bash
 poetry add pytorch-posthoc-ema
 ```
 
