@@ -8,6 +8,9 @@ from typing import Iterator, Optional, Generator
 import torch
 from PIL import Image
 from torch import nn
+import pickle
+import io
+import torch.serialization
 
 from .karras_ema import KarrasEMA
 from .utils import _safe_torch_load, p_dot_p, sigma_rel_to_gamma, solve_weights
@@ -285,37 +288,49 @@ class PostHocEMA:
 
     @contextmanager
     def model(
-        self, model: nn.Module, sigma_rel: float
-    ) -> Generator[nn.Module, None, None]:
-        """Context manager that temporarily sets model parameters to EMA state.
+        self,
+        model: nn.Module,
+        sigma_rel: float,
+    ) -> Iterator[nn.Module]:
+        """
+        Context manager for temporarily setting model parameters to EMA state.
 
         Args:
-            model: Model to update
+            model: Model to temporarily set to EMA state
             sigma_rel: Target relative standard deviation
 
-        Returns:
-            Model with EMA parameters
+        Yields:
+            nn.Module: Model with EMA parameters
         """
-        # Store original device and move model to CPU
+        # Move model to CPU for memory efficiency
         original_device = next(model.parameters()).device
         model.cpu()
         torch.cuda.empty_cache()
 
         try:
             with self.state_dict(sigma_rel=sigma_rel) as state_dict:
-                ema_model = deepcopy(model)
-                result = ema_model.load_state_dict(
+                # Store original state only for parameters that will be modified
+                original_state = {
+                    name: param.detach().clone()
+                    for name, param in model.state_dict().items()
+                    if name in state_dict
+                }
+
+                # Load EMA state directly into model
+                result = model.load_state_dict(
                     state_dict, strict=not self.only_save_diff
                 )
                 assert (
                     len(result.unexpected_keys) == 0
                 ), f"Unexpected keys: {result.unexpected_keys}"
-                ema_model.eval()  # Set to eval mode to handle BatchNorm
-                yield ema_model
-                # Clean up EMA model
-                if hasattr(ema_model, "cuda"):
-                    ema_model.cpu()
-                del ema_model
+                model.eval()  # Set to eval mode to handle BatchNorm
+                yield model
+
+                # Restore original state
+                model.load_state_dict(original_state, strict=False)
+                del original_state
+                del state_dict  # Free memory for state dict
+                torch.cuda.empty_cache()
         finally:
             # Restore model to original device
             model.to(original_device)
@@ -341,10 +356,18 @@ class PostHocEMA:
         gamma = sigma_rel_to_gamma(sigma_rel)
         device = torch.device("cpu")  # Keep synthesis on CPU for memory efficiency
 
-        # Get all checkpoint files
+        # First count total checkpoints to pre-allocate tensors
+        total_checkpoints = 0
+        checkpoint_files = []
         if self.ema_models is not None:
             # When we have ema_models, use their indices
-            indices = range(len(self.ema_models))
+            for idx in range(len(self.ema_models)):
+                files = sorted(
+                    self.checkpoint_dir.glob(f"{idx}.*.pt"),
+                    key=lambda p: int(p.stem.split(".")[1]),
+                )
+                total_checkpoints += len(files)
+                checkpoint_files.extend(files)
         else:
             # When loading from path, find all unique indices
             indices = set()
@@ -353,78 +376,101 @@ class PostHocEMA:
                 indices.add(idx)
             indices = sorted(indices)
 
-        # Get checkpoint files and info
-        checkpoint_files = []
-        gammas = []
-        timesteps = []
-        for idx in indices:
-            files = sorted(
-                self.checkpoint_dir.glob(f"{idx}.*.pt"),
-                key=lambda p: int(p.stem.split(".")[1]),
-            )
-            for file in files:
-                _, timestep = map(int, file.stem.split("."))
-                if self.ema_models is not None:
-                    gammas.append(self.gammas[idx])
-                else:
-                    # Load gamma from checkpoint
-                    checkpoint = _safe_torch_load(str(file))
-                    sigma_rel = checkpoint.get("sigma_rel", None)
-                    if sigma_rel is not None:
-                        gammas.append(sigma_rel_to_gamma(sigma_rel))
-                    else:
-                        gammas.append(self.gammas[idx])
-                    del checkpoint  # Free memory
-                timesteps.append(timestep)
-                checkpoint_files.append(file)
+            for idx in indices:
+                files = sorted(
+                    self.checkpoint_dir.glob(f"{idx}.*.pt"),
+                    key=lambda p: int(p.stem.split(".")[1]),
+                )
+                total_checkpoints += len(files)
+                checkpoint_files.extend(files)
 
-        if not gammas:
+        if total_checkpoints == 0:
             raise ValueError("No checkpoints found")
 
-        # Convert to tensors
-        gammas = torch.tensor(gammas, device=device)
-        timesteps = torch.tensor(timesteps, device=device)
+        # Pre-allocate tensors
+        gammas = torch.empty(total_checkpoints, device=device)
+        timesteps = torch.empty(total_checkpoints, dtype=torch.long, device=device)
+
+        # Fill tensors one value at a time
+        for i, file in enumerate(checkpoint_files):
+            idx = int(file.stem.split(".")[0])
+            timestep = int(file.stem.split(".")[1])
+            timesteps[i] = timestep
+
+            if self.ema_models is not None:
+                gammas[i] = self.gammas[idx]
+            else:
+                # Load gamma from checkpoint
+                checkpoint = torch.load(
+                    str(file), weights_only=True, map_location="cpu"
+                )
+                sigma_rel = checkpoint.get("sigma_rel", None)
+                if sigma_rel is not None:
+                    gammas[i] = sigma_rel_to_gamma(sigma_rel)
+                else:
+                    gammas[i] = self.gammas[idx]
+                del checkpoint  # Free memory immediately
+                torch.cuda.empty_cache()
 
         # Solve for weights
         weights = solve_weights(gammas, timesteps, gamma)
 
-        # Load first checkpoint to get state dict structure
-        first_checkpoint = _safe_torch_load(str(checkpoint_files[0]))
-        state_dict = {}
+        # Free memory for gamma and timestep tensors
+        del gammas
+        del timesteps
+        torch.cuda.empty_cache()
 
-        # Get parameter names from first checkpoint
+        # Load first checkpoint to get parameter names
+        first_checkpoint = torch.load(
+            str(checkpoint_files[0]), weights_only=True, map_location="cpu"
+        )
         param_names = {
             k.replace("ema_model.", ""): k
             for k in first_checkpoint.keys()
             if k.startswith("ema_model.")
             and k.replace("ema_model.", "") not in ("initted", "step")
         }
+        del first_checkpoint
+        torch.cuda.empty_cache()
 
-        # Process one parameter at a time
-        for param_name, checkpoint_name in param_names.items():
-            param = first_checkpoint[checkpoint_name]
-            if not isinstance(param, torch.Tensor):
-                continue
+        # Initialize state dict with empty tensors
+        state_dict = {}
 
-            # Initialize with first weighted contribution
-            state_dict[param_name] = param.to(device) * weights[0]
+        # Process one checkpoint at a time
+        for file_idx, (file, weight) in enumerate(zip(checkpoint_files, weights)):
+            # Load checkpoint
+            checkpoint = torch.load(str(file), weights_only=True, map_location="cpu")
 
-            # Add remaining weighted contributions
-            for file, weight in zip(checkpoint_files[1:], weights[1:]):
-                checkpoint = _safe_torch_load(str(file))
-                param = checkpoint[checkpoint_name]
-                if isinstance(param, torch.Tensor):
-                    state_dict[param_name].add_(param.to(device) * weight)
-                del checkpoint  # Free memory
+            # Process all parameters from this checkpoint
+            for param_name, checkpoint_name in param_names.items():
+                if checkpoint_name not in checkpoint:
+                    continue
+
+                param_data = checkpoint[checkpoint_name]
+                if not isinstance(param_data, torch.Tensor):
+                    continue
+
+                if file_idx == 0:
+                    # Initialize parameter with first weighted contribution
+                    state_dict[param_name] = param_data.to(device) * weight
+                else:
+                    # Add weighted contribution to existing parameter
+                    state_dict[param_name].add_(param_data.to(device) * weight)
+
+            # Free memory for this checkpoint
+            del checkpoint
+            torch.cuda.empty_cache()
 
         # Free memory
-        del first_checkpoint
+        del weights
+        torch.cuda.empty_cache()
 
         try:
             yield state_dict
         finally:
             # Clean up
             del state_dict
+            torch.cuda.empty_cache()
 
     def _solve_weights(
         self,

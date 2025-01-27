@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import psutil
 import torch
@@ -73,25 +74,21 @@ def reset_peak_ram():
     _peak_ram_usage = get_ram_usage()
 
 
-def monitor_operation(operation, interval=0.001):
+def monitor_operation(operation):
     """Monitor RAM usage during an operation."""
-    import threading
-    import time
+    # Get RAM usage before operation
+    pre_ram = get_ram_usage()
 
-    stop_monitoring = threading.Event()
+    # Run operation
+    result = operation()
 
-    def monitor():
-        while not stop_monitoring.is_set():
-            get_ram_usage()  # This will update peak RAM
-            time.sleep(interval)
+    # Get RAM usage after operation
+    post_ram = get_ram_usage()
 
-    monitor_thread = threading.Thread(target=monitor)
-    monitor_thread.start()
-    try:
-        result = operation()
-    finally:
-        stop_monitoring.set()
-        monitor_thread.join()
+    # Update peak RAM if needed
+    global _peak_ram_usage
+    _peak_ram_usage = max(_peak_ram_usage, pre_ram, post_ram)
+
     return result
 
 
@@ -352,25 +349,68 @@ def test_synthesis_memory_usage():
 
     # Monitor synthesis memory usage
     print("\nStarting synthesis...")
+
+    # First test: model context manager
+    print("\nTesting model context manager synthesis:")
     pre_synthesis_ram = get_ram_usage()
     reset_peak_ram()
 
-    def synthesize():
+    def synthesize_with_model():
         with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
             # Force a full synthesis by accessing parameters
             for param in ema_model.parameters():
                 _ = param.shape
 
-    monitor_operation(synthesize)
+    monitor_operation(synthesize_with_model)
 
     post_synthesis_ram = get_ram_usage()
     peak_synthesis_ram = get_peak_ram_usage()
-    print(f"\nSynthesis memory usage:")
     print(f"Pre-synthesis RAM:  {pre_synthesis_ram:.2f}MB")
     print(f"Post-synthesis RAM: {post_synthesis_ram:.2f}MB")
     print(f"Peak synthesis RAM: {peak_synthesis_ram:.2f}MB")
     print(f"RAM increase: {post_synthesis_ram - pre_synthesis_ram:.2f}MB")
     print(f"RAM spike: {peak_synthesis_ram - pre_synthesis_ram:.2f}MB")
+    print(f"Relative peak RAM: {(peak_synthesis_ram/pre_synthesis_ram)*100:.1f}%")
+
+    # Assert RAM usage is within limits
+    assert peak_synthesis_ram <= pre_synthesis_ram * 2.5, (
+        f"Synthesis caused excessive RAM usage. "
+        f"Peak RAM ({peak_synthesis_ram:.2f}MB) was more than 2.5x "
+        f"pre-synthesis RAM ({pre_synthesis_ram:.2f}MB)"
+    )
+
+    # Second test: state_dict synthesis
+    print("\nTesting state_dict synthesis:")
+    pre_synthesis_ram = get_ram_usage()
+    reset_peak_ram()
+
+    synthesis_start = time.perf_counter()
+
+    def synthesize_with_state_dict():
+        with posthoc_ema.state_dict(sigma_rel=0.15) as ema_state_dict:
+            # Force processing by accessing dict
+            for param in ema_state_dict.values():
+                _ = param.shape
+
+    monitor_operation(synthesize_with_state_dict)
+    synthesis_end = time.perf_counter()
+
+    post_synthesis_ram = get_ram_usage()
+    peak_synthesis_ram = get_peak_ram_usage()
+    print(f"Pre-synthesis RAM:  {pre_synthesis_ram:.2f}MB")
+    print(f"Post-synthesis RAM: {post_synthesis_ram:.2f}MB")
+    print(f"Peak synthesis RAM: {peak_synthesis_ram:.2f}MB")
+    print(f"RAM increase: {post_synthesis_ram - pre_synthesis_ram:.2f}MB")
+    print(f"RAM spike: {peak_synthesis_ram - pre_synthesis_ram:.2f}MB")
+    print(f"Relative peak RAM: {(peak_synthesis_ram/pre_synthesis_ram)*100:.1f}%")
+    print(f"Synthesis time: {synthesis_end - synthesis_start:.2f} seconds")
+
+    # Assert RAM usage is within limits
+    assert peak_synthesis_ram <= pre_synthesis_ram * 2.5, (
+        f"Synthesis caused excessive RAM usage. "
+        f"Peak RAM ({peak_synthesis_ram:.2f}MB) was more than 2.5x "
+        f"pre-synthesis RAM ({pre_synthesis_ram:.2f}MB)"
+    )
 
     # Cleanup
     model.cpu()
