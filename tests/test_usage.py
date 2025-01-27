@@ -600,3 +600,58 @@ def test_context_manager_with_only_save_diff():
         for file in Path("posthoc-ema").glob("*"):
             file.unlink()
         Path("posthoc-ema").rmdir()
+
+
+def test_calculation_dtype():
+    """Test that synthesis calculations use specified calculation_dtype."""
+    # Create a model with mixed dtypes
+    model = torch.nn.Sequential(
+        torch.nn.Linear(512, 512),  # Default is float32
+        torch.nn.BatchNorm1d(512, track_running_stats=True),
+    )
+
+    # Convert model to float16
+    model = model.to(torch.float16)
+
+    # Create EMA instance
+    posthoc_ema = PostHocEMA.from_model(
+        model,
+        "posthoc-ema",
+        checkpoint_every=5,
+        sigma_rels=(0.05,),
+    )
+
+    # Update model
+    for _ in range(10):
+        with torch.no_grad():
+            model[0].weight.copy_(torch.randn_like(model[0].weight))
+            model[0].bias.copy_(torch.randn_like(model[0].bias))
+        posthoc_ema.update_(model)
+
+    # Test default behavior (float32 calculations, float16 output)
+    with posthoc_ema.state_dict(sigma_rel=0.05) as state_dict:
+        # All parameters should be float16 (original dtype)
+        assert state_dict["0.weight"].dtype == torch.float16
+        assert state_dict["0.bias"].dtype == torch.float16
+        assert state_dict["1.weight"].dtype == torch.float16
+        assert state_dict["1.bias"].dtype == torch.float16
+        assert state_dict["1.running_mean"].dtype == torch.float16
+        assert state_dict["1.running_var"].dtype == torch.float16
+
+    # Test float64 behavior
+    with posthoc_ema.state_dict(
+        sigma_rel=0.05, calculation_dtype=torch.float64
+    ) as state_dict:
+        # All parameters should still be float16 (original dtype)
+        assert state_dict["0.weight"].dtype == torch.float16
+        assert state_dict["0.bias"].dtype == torch.float16
+        assert state_dict["1.weight"].dtype == torch.float16
+        assert state_dict["1.bias"].dtype == torch.float16
+        assert state_dict["1.running_mean"].dtype == torch.float16
+        assert state_dict["1.running_var"].dtype == torch.float16
+
+    # Clean up
+    if Path("posthoc-ema").exists():
+        for file in Path("posthoc-ema").glob("*"):
+            file.unlink()
+        Path("posthoc-ema").rmdir()

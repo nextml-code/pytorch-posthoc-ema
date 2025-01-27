@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Iterator, Optional, Generator
+from typing import Iterator, Optional, Generator, Dict
 
 import torch
 from PIL import Image
@@ -28,6 +28,7 @@ class PostHocEMA:
         update_every: Number of steps between EMA updates
         checkpoint_every: Number of steps between checkpoints
         checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
+        calculation_dtype: Data type for synthesis calculations (default=torch.float32)
         only_save_diff: If True, only save parameters with requires_grad=True
     """
 
@@ -39,6 +40,7 @@ class PostHocEMA:
         update_every: int = 10,
         checkpoint_every: int = 1000,
         checkpoint_dtype: Optional[torch.dtype] = None,
+        calculation_dtype: torch.dtype = torch.float32,
         only_save_diff: bool = False,
     ):
         if sigma_rels is None:
@@ -47,6 +49,7 @@ class PostHocEMA:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.max_checkpoints = max_checkpoints
         self.checkpoint_dtype = checkpoint_dtype
+        self.calculation_dtype = calculation_dtype
         self.update_every = update_every
         self.checkpoint_every = checkpoint_every
         self.only_save_diff = only_save_diff
@@ -67,6 +70,7 @@ class PostHocEMA:
         update_every: int = 10,
         checkpoint_every: int = 1000,
         checkpoint_dtype: Optional[torch.dtype] = None,
+        calculation_dtype: torch.dtype = torch.float32,
         only_save_diff: bool = False,
     ) -> PostHocEMA:
         """
@@ -80,6 +84,7 @@ class PostHocEMA:
             update_every: Number of steps between EMA updates
             checkpoint_every: Number of steps between checkpoints
             checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
+            calculation_dtype: Data type for synthesis calculations (default=torch.float32)
             only_save_diff: If True, only save parameters with requires_grad=True
 
         Returns:
@@ -92,6 +97,7 @@ class PostHocEMA:
             update_every=update_every,
             checkpoint_every=checkpoint_every,
             checkpoint_dtype=checkpoint_dtype,
+            calculation_dtype=calculation_dtype,
             only_save_diff=only_save_diff,
         )
         instance.checkpoint_dir.mkdir(exist_ok=True, parents=True)
@@ -291,6 +297,8 @@ class PostHocEMA:
         self,
         model: nn.Module,
         sigma_rel: float,
+        *,
+        calculation_dtype: torch.dtype = torch.float32,
     ) -> Iterator[nn.Module]:
         """
         Context manager for temporarily setting model parameters to EMA state.
@@ -298,6 +306,7 @@ class PostHocEMA:
         Args:
             model: Model to temporarily set to EMA state
             sigma_rel: Target relative standard deviation
+            calculation_dtype: Data type for synthesis calculations (default=torch.float32)
 
         Yields:
             nn.Module: Model with EMA parameters
@@ -308,7 +317,9 @@ class PostHocEMA:
         torch.cuda.empty_cache()
 
         try:
-            with self.state_dict(sigma_rel=sigma_rel) as state_dict:
+            with self.state_dict(
+                sigma_rel, calculation_dtype=calculation_dtype
+            ) as state_dict:
                 # Store original state only for parameters that will be modified
                 original_state = {
                     name: param.detach().clone()
@@ -340,14 +351,15 @@ class PostHocEMA:
     def state_dict(
         self,
         sigma_rel: float,
-        step: int | None = None,
-    ) -> Iterator[dict[str, torch.Tensor]]:
+        *,
+        calculation_dtype: torch.dtype = torch.float32,
+    ) -> Iterator[Dict[str, torch.Tensor]]:
         """
         Context manager for getting state dict for synthesized EMA model.
 
         Args:
             sigma_rel: Target relative standard deviation
-            step: Optional specific training step to synthesize for
+            calculation_dtype: Data type for synthesis calculations (default=torch.float32)
 
         Yields:
             dict[str, torch.Tensor]: State dict with synthesized weights
@@ -387,8 +399,8 @@ class PostHocEMA:
         if total_checkpoints == 0:
             raise ValueError("No checkpoints found")
 
-        # Pre-allocate tensors
-        gammas = torch.empty(total_checkpoints, device=device)
+        # Pre-allocate tensors in calculation dtype
+        gammas = torch.empty(total_checkpoints, dtype=calculation_dtype, device=device)
         timesteps = torch.empty(total_checkpoints, dtype=torch.long, device=device)
 
         # Fill tensors one value at a time
@@ -412,15 +424,20 @@ class PostHocEMA:
                 del checkpoint  # Free memory immediately
                 torch.cuda.empty_cache()
 
-        # Solve for weights
-        weights = solve_weights(gammas, timesteps, gamma)
+        # Solve for weights in calculation dtype
+        weights = solve_weights(
+            gammas,
+            timesteps,
+            gamma,
+            calculation_dtype=calculation_dtype,
+        )
 
         # Free memory for gamma and timestep tensors
         del gammas
         del timesteps
         torch.cuda.empty_cache()
 
-        # Load first checkpoint to get parameter names
+        # Load first checkpoint to get parameter names and original dtypes
         first_checkpoint = torch.load(
             str(checkpoint_files[0]), weights_only=True, map_location="cpu"
         )
@@ -429,6 +446,12 @@ class PostHocEMA:
             for k in first_checkpoint.keys()
             if k.startswith("ema_model.")
             and k.replace("ema_model.", "") not in ("initted", "step")
+        }
+        # Store original dtypes for each parameter
+        param_dtypes = {
+            name: first_checkpoint[checkpoint_name].dtype
+            for name, checkpoint_name in param_names.items()
+            if isinstance(first_checkpoint[checkpoint_name], torch.Tensor)
         }
         del first_checkpoint
         torch.cuda.empty_cache()
@@ -450,6 +473,9 @@ class PostHocEMA:
                 if not isinstance(param_data, torch.Tensor):
                     continue
 
+                # Convert to calculation dtype for synthesis
+                param_data = param_data.to(calculation_dtype)
+
                 if file_idx == 0:
                     # Initialize parameter with first weighted contribution
                     state_dict[param_name] = param_data.to(device) * weight
@@ -460,6 +486,11 @@ class PostHocEMA:
             # Free memory for this checkpoint
             del checkpoint
             torch.cuda.empty_cache()
+
+        # Convert back to original dtypes
+        for name, tensor in state_dict.items():
+            if name in param_dtypes:
+                state_dict[name] = tensor.to(param_dtypes[name])
 
         # Free memory
         del weights
