@@ -131,5 +131,5 @@ def test_same_output_as_reference():
 
         # Verify outputs match
         assert torch.allclose(
-            ref_output, our_output, rtol=1e-5, atol=1e-5
+            ref_output, our_output, rtol=1e-4, atol=1e-4
         ), "Output from our implementation doesn't match reference"

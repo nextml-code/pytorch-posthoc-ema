@@ -22,6 +22,7 @@ New features and changes:
 - Allow "Switch EMA" with PostHocEMA
 - No extra VRAM usage by keeping EMA on cpu
 - No extra VRAM usage for synthesization during evaluation
+- Low RAM usage for synthesis
 - Visualization of EMA reconstruction error before training
 
 ## Install

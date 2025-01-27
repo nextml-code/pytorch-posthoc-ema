@@ -341,12 +341,7 @@ class PostHocEMA:
         gamma = sigma_rel_to_gamma(sigma_rel)
         device = torch.device("cpu")  # Keep synthesis on CPU for memory efficiency
 
-        # Get all checkpoints
-        gammas = []
-        timesteps = []
-        checkpoints = []
-
-        # Collect checkpoint info
+        # Get all checkpoint files
         if self.ema_models is not None:
             # When we have ema_models, use their indices
             indices = range(len(self.ema_models))
@@ -358,139 +353,78 @@ class PostHocEMA:
                 indices.add(idx)
             indices = sorted(indices)
 
-        # Collect checkpoint info
+        # Get checkpoint files and info
+        checkpoint_files = []
+        gammas = []
+        timesteps = []
         for idx in indices:
-            checkpoint_files = sorted(
+            files = sorted(
                 self.checkpoint_dir.glob(f"{idx}.*.pt"),
                 key=lambda p: int(p.stem.split(".")[1]),
             )
-            for file in checkpoint_files:
+            for file in files:
                 _, timestep = map(int, file.stem.split("."))
-                # When we have ema_models, use their gammas
                 if self.ema_models is not None:
                     gammas.append(self.gammas[idx])
                 else:
-                    # When loading from path, load gamma from checkpoint
+                    # Load gamma from checkpoint
                     checkpoint = _safe_torch_load(str(file))
                     sigma_rel = checkpoint.get("sigma_rel", None)
                     if sigma_rel is not None:
                         gammas.append(sigma_rel_to_gamma(sigma_rel))
                     else:
-                        # If no sigma_rel in checkpoint, use index-based gamma
                         gammas.append(self.gammas[idx])
+                    del checkpoint  # Free memory
                 timesteps.append(timestep)
-                checkpoints.append(file)
+                checkpoint_files.append(file)
 
         if not gammas:
-            raise ValueError("No valid gamma values found in checkpoints")
+            raise ValueError("No checkpoints found")
 
-        # Use latest step if not specified
-        step = step if step is not None else max(timesteps)
-        assert step <= max(
-            timesteps
-        ), f"Cannot synthesize for step {step} > max available step {max(timesteps)}"
+        # Convert to tensors
+        gammas = torch.tensor(gammas, device=device)
+        timesteps = torch.tensor(timesteps, device=device)
 
-        # Solve for optimal weights using double precision
-        gamma_i = torch.tensor(gammas, device=device, dtype=torch.float64)
-        t_i = torch.tensor(timesteps, device=device, dtype=torch.float64)
-        gamma_r = torch.tensor([gamma], device=device, dtype=torch.float64)
-        t_r = torch.tensor([step], device=device, dtype=torch.float64)
-
-        weights = self._solve_weights(t_i, gamma_i, t_r, gamma_r)
-        weights = weights.squeeze(-1).to(dtype=torch.float64)  # Keep in float64
+        # Solve for weights
+        weights = solve_weights(gammas, timesteps, gamma)
 
         # Load first checkpoint to get state dict structure
-        ckpt = _safe_torch_load(str(checkpoints[0]), map_location=device)
+        first_checkpoint = _safe_torch_load(str(checkpoint_files[0]))
+        state_dict = {}
 
-        # Extract model parameters, handling both formats and filtering out internal state
-        model_keys = {}
-        for k in ckpt.keys():
-            # Skip internal EMA tracking variables
-            if k in ("initted", "step", "sigma_rel"):
-                continue
-            if k.startswith("ema_model."):
-                # Reference format: "ema_model.weight" -> "weight"
-                model_keys[k] = k.replace("ema_model.", "")
-            else:
-                # Our format: "weight" -> "weight"
-                model_keys[k] = k
-
-        # Zero initialize synthesized state with double precision
-        synth_state = {}
-        original_dtypes = {}  # Store original dtypes
-        for ref_key, our_key in model_keys.items():
-            if ref_key in ckpt:
-                original_dtypes[our_key] = ckpt[ref_key].dtype
-                synth_state[our_key] = torch.zeros_like(
-                    ckpt[ref_key], device=device, dtype=torch.float64
-                )
-            elif our_key in ckpt:
-                original_dtypes[our_key] = ckpt[our_key].dtype
-                synth_state[our_key] = torch.zeros_like(
-                    ckpt[our_key], device=device, dtype=torch.float64
-                )
-
-        # Combine checkpoints using solved weights
-        for checkpoint, weight in zip(checkpoints, weights.tolist()):
-            ckpt_state = _safe_torch_load(str(checkpoint), map_location=device)
-            for ref_key, our_key in model_keys.items():
-                if ref_key in ckpt_state:
-                    ckpt_tensor = ckpt_state[ref_key]
-                elif our_key in ckpt_state:
-                    ckpt_tensor = ckpt_state[our_key]
-                else:
-                    continue
-                # Convert checkpoint tensor to double precision
-                ckpt_tensor = ckpt_tensor.to(dtype=torch.float64, device=device)
-                # Use double precision for accumulation
-                synth_state[our_key].add_(ckpt_tensor * weight)
-
-        # Convert final state to target dtype and filter out internal state
-        # Only include parameters with requires_grad=True and buffers
-        if self.ema_models is not None:
-            # When we have ema_models, use their parameter names
-            param_names = {
-                name for name, param in self.ema_models[0].ema_model.named_parameters()
-            }
-            if self.only_save_diff:
-                param_names = {
-                    name
-                    for name in param_names
-                    if self.ema_models[0].ema_model.get_parameter(name).requires_grad
-                }
-            buffer_names = {
-                name for name, _ in self.ema_models[0].ema_model.named_buffers()
-            }
-        else:
-            # When loading from path, we can't filter by requires_grad
-            # since we don't have access to the original model
-            param_names = set()
-            buffer_names = set()
-
-        synth_state = {
-            k: v.to(
-                dtype=(
-                    self.checkpoint_dtype
-                    if self.checkpoint_dtype is not None
-                    else original_dtypes[k]
-                ),
-                device=device,
-            )
-            for k, v in synth_state.items()
-            if k not in ("initted", "step", "sigma_rel")  # Filter out internal state
-            and (
-                not param_names  # If we don't have param_names, include everything
-                or k in param_names  # Include parameters with requires_grad
-                or k in buffer_names  # Include all buffers
-            )
+        # Get parameter names from first checkpoint
+        param_names = {
+            k.replace("ema_model.", ""): k
+            for k in first_checkpoint.keys()
+            if k.startswith("ema_model.")
+            and k.replace("ema_model.", "") not in ("initted", "step")
         }
 
+        # Process one parameter at a time
+        for param_name, checkpoint_name in param_names.items():
+            param = first_checkpoint[checkpoint_name]
+            if not isinstance(param, torch.Tensor):
+                continue
+
+            # Initialize with first weighted contribution
+            state_dict[param_name] = param.to(device) * weights[0]
+
+            # Add remaining weighted contributions
+            for file, weight in zip(checkpoint_files[1:], weights[1:]):
+                checkpoint = _safe_torch_load(str(file))
+                param = checkpoint[checkpoint_name]
+                if isinstance(param, torch.Tensor):
+                    state_dict[param_name].add_(param.to(device) * weight)
+                del checkpoint  # Free memory
+
+        # Free memory
+        del first_checkpoint
+
         try:
-            yield synth_state
+            yield state_dict
         finally:
-            # Clean up tensors
-            del synth_state
-            torch.cuda.empty_cache()
+            # Clean up
+            del state_dict
 
     def _solve_weights(
         self,

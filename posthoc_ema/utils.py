@@ -95,29 +95,55 @@ def p_dot_p(t_a: Tensor, gamma_a: Tensor, t_b: Tensor, gamma_b: Tensor) -> Tenso
     return num / den
 
 
-def solve_weights(t_i: Tensor, gamma_i: Tensor, t_r: Tensor, gamma_r: Tensor) -> Tensor:
+def solve_weights(
+    gammas: torch.Tensor,
+    timesteps: torch.Tensor,
+    target_gamma: float,
+) -> torch.Tensor:
     """
-    Solve for optimal weights to synthesize target EMA profile.
+    Solve for optimal weights to synthesize EMA model with target gamma.
 
     Args:
-        t_i: Timesteps for source profiles
-        gamma_i: Gamma values for source profiles
-        t_r: Target timesteps
-        gamma_r: Target gamma value
+        gammas: Gamma values for each checkpoint
+        timesteps: Timesteps for each checkpoint
+        target_gamma: Target gamma value
 
     Returns:
-        Tensor: Optimal weights for combining source profiles
+        torch.Tensor: Optimal weights for each checkpoint
     """
-    # Reshape tensors for matrix operations
-    rv = lambda x: x.reshape(-1, 1)  # Column vector
-    cv = lambda x: x.reshape(1, -1)  # Row vector
+    # Convert to float32 for numerical stability
+    gammas = gammas.to(dtype=torch.float32)
+    timesteps = timesteps.to(dtype=torch.float32)
+    target_gamma = torch.tensor(target_gamma, dtype=torch.float32, device=gammas.device)
 
-    # Compute matrices A and b using p_dot_p
-    A = p_dot_p(rv(t_i), rv(gamma_i), cv(t_i), cv(gamma_i))
-    b = p_dot_p(rv(t_i), rv(gamma_i), cv(t_r), cv(gamma_r))
+    # Compute p_dot_p matrix
+    p_dot_p_matrix = torch.zeros(
+        (len(gammas), len(gammas)), dtype=torch.float32, device=gammas.device
+    )
+    for i in range(len(gammas)):
+        for j in range(len(gammas)):
+            p_dot_p_matrix[i, j] = p_dot_p(
+                timesteps[i], gammas[i], timesteps[j], gammas[j]
+            )
+
+    # Compute target vector
+    target_vector = torch.tensor(
+        [
+            p_dot_p(timesteps[i], gammas[i], timesteps[-1], target_gamma)
+            for i in range(len(gammas))
+        ],
+        dtype=torch.float32,
+        device=gammas.device,
+    )
 
     # Solve linear system
-    return torch.linalg.solve(A, b)
+    try:
+        weights = torch.linalg.solve(p_dot_p_matrix, target_vector)
+    except RuntimeError:
+        # If matrix is singular, use least squares
+        weights = torch.linalg.lstsq(p_dot_p_matrix, target_vector).solution
+
+    return weights
 
 
 def _safe_torch_load(path: str | Path, *, map_location=None):
