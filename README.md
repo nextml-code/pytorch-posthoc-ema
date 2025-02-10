@@ -5,9 +5,10 @@ Choose your EMA decay rate after training. No need to decide upfront.
 The library uses `sigma_rel` (relative standard deviation) to parameterize EMA decay rates, which relates to the classical EMA decay rate `beta` as follows:
 
 ```python
-beta = 0.9999  # Very slow decay -> sigma_rel ≈ 0.05
-beta = 0.999   # Medium decay   -> sigma_rel ≈ 0.15
-beta = 0.99    # Fast decay     -> sigma_rel ≈ 0.28
+beta = 0.9999  # Very slow decay -> sigma_rel ≈ 0.01
+beta = 0.9990  # Slow decay     -> sigma_rel ≈ 0.03
+beta = 0.9900  # Medium decay   -> sigma_rel ≈ 0.10
+beta = 0.9000  # Fast decay     -> sigma_rel ≈ 0.27
 ```
 
 This library was adapted from [ema-pytorch](https://github.com/lucidrains/ema-pytorch) by lucidrains.
