@@ -92,7 +92,6 @@ def p_dot_p(
 
     num = (gamma_a + 1) * (gamma_b + 1) * t_ratio**t_exp
     den = (gamma_a + gamma_b + 1) * t_max
-
     return num / den
 
 
@@ -102,6 +101,7 @@ def solve_weights(
     target_gamma: float,
     *,
     calculation_dtype: torch.dtype = torch.float32,
+    target_sigma_rel: float | None = None,
 ) -> torch.Tensor:
     """Solve for weights that produce target gamma when applied to gammas.
 
@@ -110,6 +110,7 @@ def solve_weights(
         timesteps: Tensor of timesteps
         target_gamma: Target gamma value
         calculation_dtype: Data type for calculations (default=torch.float32)
+        target_sigma_rel: Optional target sigma_rel value. If not provided, will be computed from target_gamma.
 
     Returns:
         Tensor of weights
@@ -121,6 +122,13 @@ def solve_weights(
         target_gamma, dtype=calculation_dtype, device=gammas.device
     )
     target_timestep = timesteps[-1]  # Use last timestep as target
+
+    # Print debug info
+    print(f"\nSolve weights debug info:")
+    print(f"  Source gammas: {gammas.tolist()}")
+    print(f"  Target gamma: {target_gamma.item()}")
+    print(f"  Timesteps range: {timesteps[0].item()} to {timesteps[-1].item()}")
+    print(f"  Calculation dtype: {calculation_dtype}")
 
     # Pre-allocate tensor in calculation dtype
     p_dot_p_matrix = torch.empty(
@@ -134,6 +142,14 @@ def solve_weights(
                 timesteps[i], gammas[i], timesteps[j], gammas[j]
             )
 
+    # Print matrix properties
+    print(f"\nMatrix properties:")
+    print(f"  A shape: {p_dot_p_matrix.shape}")
+    print(f"  A condition number: {torch.linalg.cond(p_dot_p_matrix).item():.2e}")
+    print(
+        f"  A min/max: {p_dot_p_matrix.min().item():.2e}/{p_dot_p_matrix.max().item():.2e}"
+    )
+
     # Compute target vector
     target_vector = torch.tensor(
         [
@@ -144,8 +160,100 @@ def solve_weights(
         device=gammas.device,
     )
 
-    # Solve for weights
-    return torch.linalg.solve(p_dot_p_matrix, target_vector)
+    print(f"  b shape: {target_vector.shape}")
+    print(
+        f"  b min/max: {target_vector.min().item():.2e}/{target_vector.max().item():.2e}"
+    )
+
+    # Use target_sigma_rel directly if provided, otherwise compute from gamma
+    if target_sigma_rel is None:
+        target_sigma_rel = float(
+            np.sqrt((target_gamma + 1) / ((target_gamma + 2) * (target_gamma + 3)))
+        )
+    print(f"\nSolver selection:")
+    print(f"  Target sigma_rel: {target_sigma_rel:.6f}")
+    print(f"  Using {'original' if target_sigma_rel <= 0.28 else 'stable'} solver")
+
+    if target_sigma_rel <= 0.28:
+        # Original solver for small sigma_rel values
+        try:
+            print("  Attempting direct solve...")
+            weights = torch.linalg.solve(p_dot_p_matrix, target_vector)
+            print("  Direct solve succeeded")
+            print(f"  Weights sum: {weights.sum().item():.6f}")
+            print(
+                f"  Weights min/max: {weights.min().item():.6f}/{weights.max().item():.6f}"
+            )
+            return weights
+        except RuntimeError as e:
+            print(f"  Direct solve failed: {str(e)}")
+            print("  Falling back to SVD...")
+            # Original fallback
+            U, S, Vh = torch.linalg.svd(p_dot_p_matrix)
+            S_inv = torch.where(S > 0, 1.0 / S, torch.zeros_like(S))
+            weights = Vh.t() @ (
+                S_inv.unsqueeze(-1) * (U.t() @ target_vector.unsqueeze(-1))
+            )
+            weights = weights.squeeze()
+            print("  SVD solve succeeded")
+            print(f"  Weights sum: {weights.sum().item():.6f}")
+            print(
+                f"  Weights min/max: {weights.min().item():.6f}/{weights.max().item():.6f}"
+            )
+            return weights
+    else:
+        # Use more robust solver for larger sigma_rel values
+        # Add moderate regularization for stability
+        p_dot_p_matrix.diagonal().add_(1e-6)
+
+        try:
+            print("  Attempting direct solve with regularization...")
+            weights = torch.linalg.solve(p_dot_p_matrix, target_vector)
+            if torch.isfinite(weights).all() and weights.abs().max() < 1e3:
+                print("  Direct solve succeeded")
+                print(f"  Weights sum: {weights.sum().item():.6f}")
+                print(
+                    f"  Weights min/max: {weights.min().item():.6f}/{weights.max().item():.6f}"
+                )
+                return weights
+            print("  Direct solve produced unstable weights")
+        except RuntimeError as e:
+            print(f"  Direct solve failed: {str(e)}")
+
+        try:
+            print("  Attempting SVD with stronger filtering...")
+            U, S, Vh = torch.linalg.svd(p_dot_p_matrix)
+            rcond = 1e-8
+            threshold = rcond * S.max()
+            S_inv = torch.where(S > threshold, 1.0 / S, torch.zeros_like(S))
+            weights = Vh.t() @ (
+                S_inv.unsqueeze(-1) * (U.t() @ target_vector.unsqueeze(-1))
+            )
+            weights = weights.squeeze()
+            if torch.isfinite(weights).all() and weights.abs().max() < 1e3:
+                print("  SVD solve succeeded")
+                print(f"  Weights sum: {weights.sum().item():.6f}")
+                print(
+                    f"  Weights min/max: {weights.min().item():.6f}/{weights.max().item():.6f}"
+                )
+                return weights
+            print("  SVD solve produced unstable weights")
+        except RuntimeError as e:
+            print(f"  SVD solve failed: {str(e)}")
+
+        print("  Using final fallback: damped least squares...")
+        reg_matrix = (
+            p_dot_p_matrix
+            + torch.eye(len(gammas), dtype=calculation_dtype, device=gammas.device)
+            * 1e-4
+        )
+        weights = torch.linalg.solve(reg_matrix, target_vector)
+        print("  Damped least squares succeeded")
+        print(f"  Weights sum: {weights.sum().item():.6f}")
+        print(
+            f"  Weights min/max: {weights.min().item():.6f}/{weights.max().item():.6f}"
+        )
+        return weights
 
 
 def _safe_torch_load(path: str | Path, *, map_location=None):

@@ -43,18 +43,18 @@ def inplace_lerp(tgt: Tensor, src: Tensor, weight):
 
 class KarrasEMA(Module):
     """
-    Exponential Moving Average module using hyperparameters from the Karras et al. paper.
+    Karras EMA implementation with power function decay profile.
 
     Args:
-        model: The model to create an EMA of
-        sigma_rel: Relative standard deviation for EMA profile width
-        gamma: Direct gamma parameter (alternative to sigma_rel)
+        model: Model to create EMA of
+        sigma_rel: Relative standard deviation for EMA profile
+        gamma: Alternative parameterization via gamma (don't specify both)
         ema_model: Optional pre-initialized EMA model
         update_every: Number of steps between EMA updates
-        frozen: If True, EMA weights are not updated
-        param_or_buffer_names_no_ema: Set of parameter/buffer names to exclude from EMA
-        ignore_names: Set of names to ignore
-        ignore_startswith_names: Set of name prefixes to ignore
+        frozen: Whether to freeze EMA updates
+        param_or_buffer_names_no_ema: Parameter/buffer names to exclude from EMA
+        ignore_names: Parameter/buffer names to ignore
+        ignore_startswith_names: Parameter/buffer name prefixes to ignore
         only_save_diff: If True, only save parameters with requires_grad=True
     """
 
@@ -111,12 +111,11 @@ class KarrasEMA(Module):
             # Move model back to original device
             model.to(original_device)
 
-            # Get parameter names that require gradients
+            # Get parameter names for floating point or complex parameters
             self.param_names = {
                 name
                 for name, param in self.ema_model.named_parameters()
-                if (not only_save_diff or param.requires_grad)
-                and (torch.is_floating_point(param) or torch.is_complex(param))
+                if torch.is_floating_point(param) or torch.is_complex(param)
             }
 
             # Get buffer names for floating point or complex buffers
@@ -161,6 +160,7 @@ class KarrasEMA(Module):
 
     def copy_params_from_model_to_ema(self):
         """Copy parameters from online model to EMA model."""
+        # Copy parameters
         for (name, ma_params), (_, current_params) in zip(
             self.get_params_iter(self.ema_model),
             self.get_params_iter(self.online_model[0]),
@@ -168,10 +168,19 @@ class KarrasEMA(Module):
             if self._should_update_param(name):
                 inplace_copy(ma_params.data, current_params.data)
 
+        # Copy buffers
+        for (name, ma_buffer), (_, current_buffer) in zip(
+            self.get_buffers_iter(self.ema_model),
+            self.get_buffers_iter(self.online_model[0]),
+        ):
+            if self._should_update_param(name):
+                inplace_copy(ma_buffer.data, current_buffer.data)
+
     def update_moving_average(self):
         """Update EMA weights using current beta value."""
         current_decay = self.beta
 
+        # Update parameters
         for (name, current_params), (_, ma_params) in zip(
             self.get_params_iter(self.online_model[0]),
             self.get_params_iter(self.ema_model),
@@ -179,6 +188,15 @@ class KarrasEMA(Module):
             if not self._should_update_param(name):
                 continue
             inplace_lerp(ma_params.data, current_params.data, 1.0 - current_decay)
+
+        # Update buffers
+        for (name, current_buffer), (_, ma_buffer) in zip(
+            self.get_buffers_iter(self.online_model[0]),
+            self.get_buffers_iter(self.ema_model),
+        ):
+            if not self._should_update_param(name):
+                continue
+            inplace_lerp(ma_buffer.data, current_buffer.data, 1.0 - current_decay)
 
     def _should_update_param(self, name: str) -> bool:
         """Check if parameter should be updated based on ignore rules."""
@@ -195,7 +213,18 @@ class KarrasEMA(Module):
         for name, param in model.named_parameters():
             if name not in self.param_names:
                 continue
+            if self.only_save_diff and not param.requires_grad:
+                continue
             yield name, param
+
+    def get_buffers_iter(self, model):
+        """Get iterator over model's buffers."""
+        for name, buffer in model.named_buffers():
+            if name not in self.buffer_names:
+                continue
+            if self.only_save_diff and not buffer.requires_grad:
+                continue
+            yield name, buffer
 
     def iter_all_ema_params_and_buffers(self):
         """Get iterator over all EMA parameters and buffers."""
@@ -250,24 +279,26 @@ class KarrasEMA(Module):
         return self.ema_model(*args, **kwargs)
 
     def state_dict(self):
-        """Get state dict of EMA model."""
+        """Get state dict for EMA model."""
         state_dict = {}
 
-        # Add parameters based on only_save_diff flag
+        # Save parameters based on only_save_diff flag
         for name, param in self.ema_model.named_parameters():
-            if (not self.only_save_diff or param.requires_grad) and (
-                torch.is_floating_point(param) or torch.is_complex(param)
-            ):
-                state_dict[name] = param
+            if name not in self.param_names:
+                continue
+            if self.only_save_diff and not param.requires_grad:
+                continue
+            state_dict[name] = param.data
 
-        # Add buffers (always included regardless of only_save_diff)
+        # Save buffers
         for name, buffer in self.ema_model.named_buffers():
-            if torch.is_floating_point(buffer) or torch.is_complex(buffer):
-                state_dict[name] = buffer
+            if name not in self.buffer_names:
+                continue
+            state_dict[name] = buffer.data
 
-        # Add internal state
-        state_dict["initted"] = self.initted
-        state_dict["step"] = self.step
+        # Save internal state
+        state_dict["initted"] = self.initted.data
+        state_dict["step"] = self.step.data
 
         return state_dict
 

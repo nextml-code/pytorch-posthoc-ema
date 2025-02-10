@@ -4,16 +4,34 @@ from pathlib import Path
 
 import psutil
 import torch
+import pytest
+import shutil
 
 from posthoc_ema import PostHocEMA
 
 
-def test_basic_usage_with_updates():
+@pytest.fixture(autouse=True)
+def cleanup_checkpoints():
+    """Clean up test checkpoints before and after each test."""
+    # Cleanup before test
+    for path in ["posthoc-ema", "posthoc-ema-diff", "posthoc-ema-all"]:
+        if Path(path).exists():
+            shutil.rmtree(path)
+
+    yield
+
+    # Cleanup after test
+    for path in ["posthoc-ema", "posthoc-ema-diff", "posthoc-ema-all"]:
+        if Path(path).exists():
+            shutil.rmtree(path)
+
+
+def test_basic_usage_with_updates(tmp_path: Path):
     """Test the basic usage pattern with model updates."""
     model = torch.nn.Linear(512, 512)
     posthoc_ema = PostHocEMA.from_model(
         model,
-        "posthoc-ema",
+        tmp_path / "basic-usage",
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
@@ -32,12 +50,12 @@ def test_basic_usage_with_updates():
     assert predictions.shape == (1, 512)
 
 
-def test_context_manager_helper():
+def test_context_manager_helper(tmp_path: Path):
     """Test using the context manager helper for EMA model."""
     model = torch.nn.Linear(512, 512)
     posthoc_ema = PostHocEMA.from_model(
         model,
-        "posthoc-ema",
+        tmp_path / "context-manager",
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
@@ -58,12 +76,12 @@ def test_context_manager_helper():
         assert ema_predictions.shape == predictions.shape
 
 
-def test_manual_cpu_usage():
+def test_manual_cpu_usage(tmp_path: Path):
     """Test manual CPU usage without the context manager."""
     model = torch.nn.Linear(512, 512)
     posthoc_ema = PostHocEMA.from_model(
         model,
-        "posthoc-ema",
+        tmp_path / "manual-cpu",
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
@@ -87,14 +105,15 @@ def test_manual_cpu_usage():
         del ema_model
 
 
-def test_synthesize_after_training():
+def test_synthesize_after_training(tmp_path: Path):
     """Test synthesizing EMA after training."""
     model = torch.nn.Linear(512, 512)
+    checkpoint_dir = tmp_path / "synthesize-after"
 
     # First create some checkpoints
     posthoc_ema = PostHocEMA.from_model(
         model,
-        "posthoc-ema",
+        checkpoint_dir,
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
@@ -107,20 +126,21 @@ def test_synthesize_after_training():
     data = torch.randn(1, 512)
 
     # Synthesize after training
-    posthoc_ema = PostHocEMA.from_path("posthoc-ema", model)
+    posthoc_ema = PostHocEMA.from_path(checkpoint_dir, model)
     with posthoc_ema.model(model, sigma_rel=0.15) as ema_model:
         ema_predictions = ema_model(data)
         assert ema_predictions.shape == (1, 512)
 
 
-def test_synthesize_without_model():
+def test_synthesize_without_model(tmp_path: Path):
     """Test synthesizing EMA without model."""
     model = torch.nn.Linear(512, 512)
+    checkpoint_dir = tmp_path / "synthesize-without"
 
     # First create some checkpoints
     posthoc_ema = PostHocEMA.from_model(
         model,
-        "posthoc-ema",
+        checkpoint_dir,
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
@@ -131,18 +151,20 @@ def test_synthesize_without_model():
         posthoc_ema.update_(model)
 
     # Or without model
-    posthoc_ema = PostHocEMA.from_path("posthoc-ema")
+    posthoc_ema = PostHocEMA.from_path(checkpoint_dir)
     with posthoc_ema.state_dict(sigma_rel=0.15) as state_dict:
         assert isinstance(state_dict, dict)
         assert len(state_dict) > 0
 
 
-def test_set_parameters_during_training():
+def test_set_parameters_during_training(tmp_path: Path):
     """Test setting parameters to EMA state during training."""
     model = torch.nn.Linear(512, 512)
+    checkpoint_dir = tmp_path / "set-params"
+
     posthoc_ema = PostHocEMA.from_model(
         model,
-        "posthoc-ema",
+        checkpoint_dir,
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
     )
@@ -165,14 +187,8 @@ def test_set_parameters_during_training():
             model.weight, original_state["weight"].clone().detach()
         )
 
-    # Clean up
-    if Path("posthoc-ema").exists():
-        for file in Path("posthoc-ema").glob("*"):
-            file.unlink()
-        Path("posthoc-ema").rmdir()
 
-
-def test_only_requires_grad_parameters():
+def test_only_requires_grad_parameters(tmp_path: Path):
     """Test that only parameters with requires_grad=True are included in state dict when only_save_diff=True."""
     # Create a model with some parameters that don't require gradients
     model = torch.nn.Sequential(
@@ -189,7 +205,7 @@ def test_only_requires_grad_parameters():
     # Test with only_save_diff=True
     posthoc_ema_diff = PostHocEMA.from_model(
         model,
-        "posthoc-ema-diff",
+        tmp_path / "only-grad-diff",
         checkpoint_every=5,
         sigma_rels=(0.05, 0.28),
         only_save_diff=True,
@@ -198,7 +214,7 @@ def test_only_requires_grad_parameters():
     # Test with default (only_save_diff=False)
     posthoc_ema_all = PostHocEMA.from_model(
         model,
-        "posthoc-ema-all",
+        tmp_path / "only-grad-all",
         checkpoint_every=5,
         sigma_rels=(0.05, 0.28),
     )
@@ -655,3 +671,35 @@ def test_calculation_dtype():
         for file in Path("posthoc-ema").glob("*"):
             file.unlink()
         Path("posthoc-ema").rmdir()
+
+
+def test_from_model_with_existing_checkpoints():
+    """Test that from_model raises an error when checkpoints exist."""
+    # Create a simple model
+    model = torch.nn.Linear(10, 10)
+
+    # Create initial EMA instance and some checkpoints
+    checkpoint_dir = Path("test-checkpoints")
+    posthoc_ema = PostHocEMA.from_model(
+        model=model,
+        checkpoint_dir=checkpoint_dir,
+        max_checkpoints=2,
+        update_every=1,
+        checkpoint_every=1,
+    )
+
+    # Create a checkpoint
+    posthoc_ema.update_(model)
+
+    # Try to create another instance with from_model
+    with pytest.raises(ValueError, match="already contains checkpoints"):
+        PostHocEMA.from_model(
+            model=model,
+            checkpoint_dir=checkpoint_dir,
+        )
+
+    # Clean up
+    if checkpoint_dir.exists():
+        for file in checkpoint_dir.glob("*"):
+            file.unlink()
+        checkpoint_dir.rmdir()

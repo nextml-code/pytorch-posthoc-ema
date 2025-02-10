@@ -1,10 +1,12 @@
 from pathlib import Path
 import time
+import shutil
 
 import psutil
 import torch
 import torch.cuda
 import torch.nn as nn
+import pytest
 
 from posthoc_ema import PostHocEMA
 
@@ -30,6 +32,22 @@ posthoc_ema = PostHocEMA.from_model(
     checkpoint_dtype=torch.float32,  # Store checkpoints in full precision
 )
 """
+
+
+@pytest.fixture(autouse=True)
+def cleanup_checkpoints():
+    """Clean up test checkpoints before and after each test."""
+    # Cleanup before test
+    for path in ["test_ema_checkpoint"]:
+        if Path(path).exists():
+            shutil.rmtree(path)
+
+    yield
+
+    # Cleanup after test
+    for path in ["test_ema_checkpoint"]:
+        if Path(path).exists():
+            shutil.rmtree(path)
 
 
 def get_gpu_memory_usage():

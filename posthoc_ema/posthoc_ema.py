@@ -89,7 +89,19 @@ class PostHocEMA:
 
         Returns:
             PostHocEMA: Instance ready for training
+
+        Raises:
+            ValueError: If checkpoint directory already exists and contains checkpoints
         """
+        checkpoint_dir = Path(checkpoint_dir)
+        if checkpoint_dir.exists():
+            checkpoints = list(checkpoint_dir.glob("*.pt"))
+            if checkpoints:
+                raise ValueError(
+                    f"Checkpoint directory {checkpoint_dir} already contains checkpoints. "
+                    "Use from_path() to load existing checkpoints instead of from_model()."
+                )
+
         instance = cls(
             checkpoint_dir=checkpoint_dir,
             max_checkpoints=max_checkpoints,
@@ -242,32 +254,35 @@ class PostHocEMA:
             # Create checkpoint file
             checkpoint_file = self.checkpoint_dir / f"{idx}.{self.step}.pt"
 
-            # Get parameter and buffer names
-            param_names = {
-                name for name, param in ema_model.ema_model.named_parameters()
-            }
-            if self.only_save_diff:
-                param_names = {
-                    name
-                    for name in param_names
-                    if ema_model.ema_model.get_parameter(name).requires_grad
-                }
-            buffer_names = {name for name, _ in ema_model.ema_model.named_buffers()}
+            # Get state dict from EMA model
+            state_dict = ema_model.state_dict()
 
-            # Save EMA model state with correct dtype and ema_model prefix
-            state_dict = {
-                f"ema_model.{k}": (
-                    v.to(self.checkpoint_dtype)
-                    if self.checkpoint_dtype is not None
-                    else v
-                )
-                for k, v in ema_model.state_dict().items()
-                if (
-                    k in param_names  # Include parameters based on only_save_diff
-                    or k in buffer_names  # Include all buffers
-                    or k in ("initted", "step")  # Include internal state
-                )
-            }
+            # Filter parameters based on only_save_diff
+            if self.only_save_diff:
+                filtered_state_dict = {}
+                for name, param in ema_model.ema_model.named_parameters():
+                    if param.requires_grad:
+                        key = name
+                        if key in state_dict:
+                            filtered_state_dict[key] = state_dict[key]
+                # Add buffers and internal state
+                for name, buffer in ema_model.ema_model.named_buffers():
+                    key = name
+                    if key in state_dict:
+                        filtered_state_dict[key] = state_dict[key]
+                for key in ["initted", "step"]:
+                    if key in state_dict:
+                        filtered_state_dict[key] = state_dict[key]
+                state_dict = filtered_state_dict
+
+            # Convert to checkpoint dtype if specified
+            if self.checkpoint_dtype is not None:
+                state_dict = {
+                    k: v.to(self.checkpoint_dtype) if isinstance(v, torch.Tensor) else v
+                    for k, v in state_dict.items()
+                }
+
+            # Save checkpoint
             torch.save(state_dict, checkpoint_file)
 
             # Remove old checkpoints if needed
@@ -401,13 +416,15 @@ class PostHocEMA:
 
         # Pre-allocate tensors in calculation dtype
         gammas = torch.empty(total_checkpoints, dtype=calculation_dtype, device=device)
-        timesteps = torch.empty(total_checkpoints, dtype=torch.long, device=device)
+        timesteps = torch.empty(
+            total_checkpoints, dtype=calculation_dtype, device=device
+        )
 
         # Fill tensors one value at a time
         for i, file in enumerate(checkpoint_files):
             idx = int(file.stem.split(".")[0])
             timestep = int(file.stem.split(".")[1])
-            timesteps[i] = timestep
+            timesteps[i] = float(timestep)  # Convert to float
 
             if self.ema_models is not None:
                 gammas[i] = self.gammas[idx]
@@ -430,6 +447,7 @@ class PostHocEMA:
             timesteps,
             gamma,
             calculation_dtype=calculation_dtype,
+            target_sigma_rel=sigma_rel,
         )
 
         # Free memory for gamma and timestep tensors
@@ -442,10 +460,7 @@ class PostHocEMA:
             str(checkpoint_files[0]), weights_only=True, map_location="cpu"
         )
         param_names = {
-            k.replace("ema_model.", ""): k
-            for k in first_checkpoint.keys()
-            if k.startswith("ema_model.")
-            and k.replace("ema_model.", "") not in ("initted", "step")
+            k: k for k in first_checkpoint.keys() if k not in ("initted", "step")
         }
         # Store original dtypes for each parameter
         param_dtypes = {
@@ -467,6 +482,14 @@ class PostHocEMA:
             # Process all parameters from this checkpoint
             for param_name, checkpoint_name in param_names.items():
                 if checkpoint_name not in checkpoint:
+                    # If parameter is missing from checkpoint but we're not in only_save_diff mode,
+                    # or if it's a parameter with requires_grad=True, this is an error
+                    if not self.only_save_diff:
+                        raise ValueError(
+                            f"Parameter {param_name} missing from checkpoint {file} "
+                            "but only_save_diff=False"
+                        )
+                    # Skip parameters that are intentionally not saved in only_save_diff mode
                     continue
 
                 param_data = checkpoint[checkpoint_name]
