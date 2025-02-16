@@ -50,6 +50,7 @@ def test_different_sigma_rels_produce_different_weights():
         "test-checkpoints-diff-sigma",  # Changed from "posthoc-ema"
         checkpoint_every=5,
         sigma_rels=(0.05, 0.28),  # Use two different sigma_rels
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Do some training to build up EMA weights
@@ -134,6 +135,7 @@ def test_different_sigma_rels_produce_different_predictions():
         "test-checkpoints-diff-sigma",
         checkpoint_every=5,
         sigma_rels=(0.05, 0.28),
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Do some training to build up EMA weights
@@ -203,6 +205,7 @@ def test_different_sigma_rels_with_only_save_diff():
         checkpoint_every=5,
         sigma_rels=(0.05, 0.28),
         only_save_diff=True,  # Only save parameters that require gradients
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Do some training to build up EMA weights
@@ -327,6 +330,7 @@ def test_only_save_diff_doesnt_affect_grad_params():
         checkpoint_every=1,  # Checkpoint every update for debugging
         sigma_rels=(0.05, 0.4),
         only_save_diff=True,
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     posthoc_ema_without_diff = PostHocEMA.from_model(
@@ -335,6 +339,7 @@ def test_only_save_diff_doesnt_affect_grad_params():
         checkpoint_every=1,  # Checkpoint every update for debugging
         sigma_rels=(0.05, 0.4),
         only_save_diff=False,
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Do some training to build up EMA weights

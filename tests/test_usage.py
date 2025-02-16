@@ -34,6 +34,7 @@ def test_basic_usage_with_updates(tmp_path: Path):
         tmp_path / "basic-usage",
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Simulate training loop
@@ -58,6 +59,7 @@ def test_context_manager_helper(tmp_path: Path):
         tmp_path / "context-manager",
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update enough times to create checkpoints
@@ -84,6 +86,7 @@ def test_manual_cpu_usage(tmp_path: Path):
         tmp_path / "manual-cpu",
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update enough times to create checkpoints
@@ -116,6 +119,7 @@ def test_synthesize_after_training(tmp_path: Path):
         checkpoint_dir,
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
+        update_after_step=0,  # Start immediately to match original behavior
     )
     for _ in range(10):  # Reduced from 1000 for test speed
         with torch.no_grad():
@@ -143,6 +147,7 @@ def test_synthesize_without_model(tmp_path: Path):
         checkpoint_dir,
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
+        update_after_step=0,  # Start immediately to match original behavior
     )
     for _ in range(10):  # Reduced from 1000 for test speed
         with torch.no_grad():
@@ -167,6 +172,7 @@ def test_set_parameters_during_training(tmp_path: Path):
         checkpoint_dir,
         checkpoint_every=5,  # More frequent checkpoints for testing
         sigma_rels=(0.05, 0.28),  # Explicitly set sigma_rels
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update enough times to create checkpoints
@@ -209,6 +215,7 @@ def test_only_requires_grad_parameters(tmp_path: Path):
         checkpoint_every=5,
         sigma_rels=(0.05, 0.28),
         only_save_diff=True,
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Test with default (only_save_diff=False)
@@ -217,6 +224,7 @@ def test_only_requires_grad_parameters(tmp_path: Path):
         tmp_path / "only-grad-all",
         checkpoint_every=5,
         sigma_rels=(0.05, 0.28),
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update enough times to create checkpoints
@@ -300,6 +308,7 @@ def test_checkpoint_size_with_requires_grad():
         "posthoc-ema-all",
         checkpoint_every=5,
         sigma_rels=(0.05,),  # Single sigma_rel for simpler comparison
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     posthoc_ema_some = PostHocEMA.from_model(
@@ -308,6 +317,7 @@ def test_checkpoint_size_with_requires_grad():
         checkpoint_every=5,
         sigma_rels=(0.05,),  # Single sigma_rel for simpler comparison
         only_save_diff=True,  # Only save parameters with requires_grad=True
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update both models with same random values
@@ -395,6 +405,7 @@ def test_ram_usage_with_requires_grad():
         "posthoc-ema-all",
         checkpoint_every=5,
         sigma_rels=(0.05,),  # Single sigma_rel for simpler comparison
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Force garbage collection and get memory after first model
@@ -414,6 +425,7 @@ def test_ram_usage_with_requires_grad():
         "posthoc-ema-some",
         checkpoint_every=5,
         sigma_rels=(0.05,),  # Single sigma_rel for simpler comparison
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Force garbage collection and get memory after second model
@@ -464,6 +476,7 @@ def test_save_full_weights():
         checkpoint_every=5,
         sigma_rels=(0.05,),
         only_save_diff=False,  # Save all parameters
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update enough times to create checkpoints
@@ -525,6 +538,7 @@ def test_checkpoint_dtype():
         "posthoc-ema-default",
         checkpoint_every=5,
         sigma_rels=(0.05,),
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Test with specified dtype (bfloat16)
@@ -534,6 +548,7 @@ def test_checkpoint_dtype():
         checkpoint_every=5,
         sigma_rels=(0.05,),
         checkpoint_dtype=torch.bfloat16,
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update both models
@@ -594,6 +609,7 @@ def test_context_manager_with_only_save_diff():
         checkpoint_every=5,
         sigma_rels=(0.05,),
         only_save_diff=True,  # Only save parameters with requires_grad=True
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update enough times to create checkpoints
@@ -635,6 +651,7 @@ def test_calculation_dtype():
         "posthoc-ema",
         checkpoint_every=5,
         sigma_rels=(0.05,),
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Update model
@@ -686,6 +703,7 @@ def test_from_model_with_existing_checkpoints():
         max_checkpoints=2,
         update_every=1,
         checkpoint_every=1,
+        update_after_step=0,  # Start immediately to match original behavior
     )
 
     # Create a checkpoint

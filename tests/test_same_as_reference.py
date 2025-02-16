@@ -227,6 +227,7 @@ def test_same_output_as_reference():
         checkpoint_every=checkpoint_every,
         sigma_rels=sigma_rels,
         checkpoint_dtype=torch.float32,
+        update_after_step=0,  # Start immediately to match reference behavior
     )
 
     # Train both with identical updates
@@ -305,3 +306,79 @@ def test_same_output_as_reference():
         assert torch.allclose(
             ref_output, our_from_disk_output, rtol=1e-4, atol=1e-4
         ), "Output from loaded implementation doesn't match reference"
+
+
+def test_update_after_step():
+    """Test that EMA updates only start after update_after_step steps."""
+    # Create a simple model
+    net = nn.Linear(512, 512)
+    update_after_step = 50
+
+    # Initialize with same parameters
+    sigma_rels = (0.03, 0.20)
+    update_every = 10
+    checkpoint_every = 10
+
+    our_emas = OurPostHocEMA.from_model(
+        model=net,
+        checkpoint_dir="./test-checkpoints-our",
+        update_every=update_every,
+        checkpoint_every=checkpoint_every,
+        sigma_rels=sigma_rels,
+        checkpoint_dtype=torch.float32,
+        update_after_step=update_after_step,
+    )
+
+    # Train with identical updates
+    torch.manual_seed(42)  # For reproducibility
+    net.train()
+
+    # Store initial weights
+    initial_weights = {}
+    for ema_model in our_emas.ema_models:
+        initial_weights[id(ema_model)] = {
+            name: param.clone()
+            for name, param in ema_model.ema_model.named_parameters()
+        }
+
+    # Update before update_after_step
+    for step in range(update_after_step - 1):
+        with torch.no_grad():
+            net.weight.copy_(torch.randn_like(net.weight))
+            net.bias.copy_(torch.randn_like(net.bias))
+        our_emas.update_(net)
+
+        # Verify EMA weights haven't changed
+        for ema_model in our_emas.ema_models:
+            current_weights = {
+                name: param for name, param in ema_model.ema_model.named_parameters()
+            }
+            initial_weights_for_model = initial_weights[id(ema_model)]
+
+            for name, param in current_weights.items():
+                assert torch.allclose(
+                    param, initial_weights_for_model[name], rtol=1e-5, atol=1e-5
+                ), f"EMA weights changed before update_after_step at step {step}"
+
+    # Update after update_after_step
+    with torch.no_grad():
+        net.weight.copy_(torch.randn_like(net.weight))
+        net.bias.copy_(torch.randn_like(net.bias))
+    our_emas.update_(net)
+
+    # Verify EMA weights have changed
+    for ema_model in our_emas.ema_models:
+        current_weights = {
+            name: param for name, param in ema_model.ema_model.named_parameters()
+        }
+        initial_weights_for_model = initial_weights[id(ema_model)]
+
+        weights_changed = False
+        for name, param in current_weights.items():
+            if not torch.allclose(
+                param, initial_weights_for_model[name], rtol=1e-5, atol=1e-5
+            ):
+                weights_changed = True
+                break
+
+        assert weights_changed, "EMA weights did not change after update_after_step"

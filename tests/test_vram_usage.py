@@ -163,6 +163,7 @@ def test_vram_usage_with_classifier():
             update_every=1,
             checkpoint_every=5,
             checkpoint_dtype=torch.float32,
+            update_after_step=0,  # Start creating checkpoints immediately
         )
 
     posthoc_ema = monitor_operation(init_ema)
@@ -355,6 +356,7 @@ def test_synthesis_memory_usage():
         update_every=1,
         checkpoint_every=2,  # Create checkpoints more frequently
         checkpoint_dtype=torch.float32,
+        update_after_step=0,  # Start creating checkpoints immediately
     )
 
     # Create checkpoints

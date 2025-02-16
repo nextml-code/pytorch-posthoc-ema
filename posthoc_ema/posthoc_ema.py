@@ -30,6 +30,7 @@ class PostHocEMA:
         checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
         calculation_dtype: Data type for synthesis calculations (default=torch.float32)
         only_save_diff: If True, only save parameters with requires_grad=True
+        update_after_step: Number of steps after which to update EMA models
     """
 
     def __init__(
@@ -42,6 +43,7 @@ class PostHocEMA:
         checkpoint_dtype: Optional[torch.dtype] = None,
         calculation_dtype: torch.dtype = torch.float32,
         only_save_diff: bool = False,
+        update_after_step: int = 100,
     ):
         if sigma_rels is None:
             sigma_rels = (0.05, 0.28)  # Default values from paper
@@ -53,6 +55,7 @@ class PostHocEMA:
         self.update_every = update_every
         self.checkpoint_every = checkpoint_every
         self.only_save_diff = only_save_diff
+        self.update_after_step = update_after_step
 
         self.sigma_rels = sigma_rels
         self.gammas = tuple(map(sigma_rel_to_gamma, sigma_rels))
@@ -72,6 +75,7 @@ class PostHocEMA:
         checkpoint_dtype: Optional[torch.dtype] = None,
         calculation_dtype: torch.dtype = torch.float32,
         only_save_diff: bool = False,
+        update_after_step: int = 100,
     ) -> PostHocEMA:
         """
         Create PostHocEMA instance from a model for training.
@@ -86,6 +90,7 @@ class PostHocEMA:
             checkpoint_dtype: Data type for checkpoint storage (if None, uses original parameter dtype)
             calculation_dtype: Data type for synthesis calculations (default=torch.float32)
             only_save_diff: If True, only save parameters with requires_grad=True
+            update_after_step: Number of steps after which to update EMA models
 
         Returns:
             PostHocEMA: Instance ready for training
@@ -111,6 +116,7 @@ class PostHocEMA:
             checkpoint_dtype=checkpoint_dtype,
             calculation_dtype=calculation_dtype,
             only_save_diff=only_save_diff,
+            update_after_step=update_after_step,
         )
         instance.checkpoint_dir.mkdir(exist_ok=True, parents=True)
 
@@ -232,6 +238,12 @@ class PostHocEMA:
         Args:
             model: Current state of the model to update EMAs with
         """
+        self.step += 1
+
+        # Only update after update_after_step steps
+        if self.step < self.update_after_step:
+            return
+
         # Update EMA models with current model state
         for ema_model in self.ema_models:
             # Update online model reference and copy parameters
@@ -240,8 +252,6 @@ class PostHocEMA:
                 ema_model.copy_params_from_model_to_ema()
                 ema_model.initted.data.copy_(torch.tensor(True))
             ema_model.update()
-
-        self.step += 1
 
         # Create checkpoint if needed
         if self.step % self.checkpoint_every == 0:
