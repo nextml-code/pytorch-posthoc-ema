@@ -322,7 +322,7 @@ class PostHocEMA:
         self,
         model: nn.Module,
         sigma_rel: float,
-        *,
+        step: int | None = None,
         calculation_dtype: torch.dtype = torch.float32,
     ) -> Iterator[nn.Module]:
         """
@@ -331,6 +331,7 @@ class PostHocEMA:
         Args:
             model: Model to temporarily set to EMA state
             sigma_rel: Target relative standard deviation
+            step: Target training step to synthesize for (defaults to latest available)
             calculation_dtype: Data type for synthesis calculations (default=torch.float32)
 
         Yields:
@@ -343,7 +344,9 @@ class PostHocEMA:
 
         try:
             with self.state_dict(
-                sigma_rel, calculation_dtype=calculation_dtype
+                sigma_rel=sigma_rel,
+                step=step,
+                calculation_dtype=calculation_dtype,
             ) as state_dict:
                 # Store original state only for parameters that will be modified
                 original_state = {
@@ -376,7 +379,7 @@ class PostHocEMA:
     def state_dict(
         self,
         sigma_rel: float,
-        *,
+        step: int | None = None,
         calculation_dtype: torch.dtype = torch.float32,
     ) -> Iterator[Dict[str, torch.Tensor]]:
         """
@@ -384,6 +387,7 @@ class PostHocEMA:
 
         Args:
             sigma_rel: Target relative standard deviation
+            step: Target training step to synthesize for (defaults to latest available)
             calculation_dtype: Data type for synthesis calculations (default=torch.float32)
 
         Yields:
@@ -423,6 +427,23 @@ class PostHocEMA:
 
         if total_checkpoints == 0:
             raise ValueError("No checkpoints found")
+
+        # Get all timesteps and find max
+        timesteps = [int(f.stem.split(".")[1]) for f in checkpoint_files]
+        max_step = max(timesteps)
+
+        # Use provided step or default to max
+        target_step = max_step if step is None else step
+        assert target_step <= max_step, (
+            f"Cannot synthesize for step {target_step} as it is greater than "
+            f"the maximum available step {max_step}"
+        )
+
+        # Filter checkpoints to only use those up to target_step
+        checkpoint_files = [
+            f for f, t in zip(checkpoint_files, timesteps) if t <= target_step
+        ]
+        total_checkpoints = len(checkpoint_files)
 
         # Pre-allocate tensors in calculation dtype
         gammas = torch.empty(total_checkpoints, dtype=calculation_dtype, device=device)

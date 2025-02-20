@@ -382,3 +382,97 @@ def test_update_after_step():
                 break
 
         assert weights_changed, "EMA weights did not change after update_after_step"
+
+
+def test_same_output_as_reference_different_step():
+    """Test that our implementation produces identical outputs to the reference when synthesizing at a different step."""
+    # Create a simple model
+    net = nn.Linear(512, 512)
+
+    # Initialize with same parameters
+    sigma_rels = (0.03, 0.20)
+    update_every = 10
+    checkpoint_every = 10
+
+    print("\nInitializing with parameters:")
+    print(f"sigma_rels: {sigma_rels}")
+    print(f"update_every: {update_every}")
+    print(f"checkpoint_every: {checkpoint_every}")
+
+    # Create both implementations
+    ref_emas = ReferencePostHocEMA(
+        net,
+        sigma_rels=sigma_rels,
+        update_every=update_every,
+        checkpoint_every_num_steps=checkpoint_every,
+        checkpoint_folder="./test-checkpoints-ref",
+        checkpoint_dtype=torch.float32,
+    )
+
+    our_emas = OurPostHocEMA.from_model(
+        model=net,
+        checkpoint_dir="./test-checkpoints-our",
+        update_every=update_every,
+        checkpoint_every=checkpoint_every,
+        sigma_rels=sigma_rels,
+        checkpoint_dtype=torch.float32,
+        update_after_step=0,  # Start immediately to match reference behavior
+    )
+
+    # Train both with identical updates
+    torch.manual_seed(42)  # For reproducibility
+    net.train()
+
+    print("\nTraining:")
+    for step in range(100):
+        # Apply identical mutations to network
+        with torch.no_grad():
+            net.weight.copy_(torch.randn_like(net.weight))
+            net.bias.copy_(torch.randn_like(net.bias))
+
+        # Update both EMA wrappers
+        ref_emas.update()
+        our_emas.update_(net)
+
+        if step % 10 == 0:
+            print(f"Step {step}: Updated model and EMAs")
+
+    # Synthesize EMA models with same parameters at step 50 (middle of training)
+    target_sigma = 0.15
+    target_step = 50
+    print(f"\nSynthesizing with target_sigma = {target_sigma} at step {target_step}")
+
+    # Get reference checkpoints and weights
+    ref_checkpoints = sorted(Path("./test-checkpoints-ref").glob("*.pt"))
+    print("\nReference checkpoints:")
+    for cp in ref_checkpoints:
+        print(f"  {cp.name}")
+
+    # Get our checkpoints and weights
+    our_checkpoints = sorted(Path("./test-checkpoints-our").glob("*.pt"))
+    print("\nOur checkpoints:")
+    for cp in our_checkpoints:
+        print(f"  {cp.name}")
+
+    ref_synth = ref_emas.synthesize_ema_model(sigma_rel=target_sigma, step=target_step)
+
+    with our_emas.model(net, target_sigma, step=target_step) as our_synth:
+        # Test with same input
+        data = torch.randn(1, 512)
+        ref_output = ref_synth(data)
+        our_output = our_synth(data)
+
+        print("\nComparing outputs:")
+        print(f"Reference output mean: {ref_output.mean().item():.4f}")
+        print(f"Our output mean: {our_output.mean().item():.4f}")
+        print(f"Max difference: {(ref_output - our_output).abs().max().item():.4f}")
+
+        # Verify outputs match
+        assert torch.allclose(
+            ref_output, our_output, rtol=1e-4, atol=1e-4
+        ), "Output from our implementation doesn't match reference"
+
+    # Clean up
+    for path in ["./test-checkpoints-ref", "./test-checkpoints-our"]:
+        if Path(path).exists():
+            shutil.rmtree(path)
