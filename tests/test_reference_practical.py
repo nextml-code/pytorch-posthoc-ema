@@ -948,3 +948,91 @@ def test_compare_large_sigma_rel_with_traditional_ema():
         "ema_values": ema_values,
         "best_beta": best_beta,
     }
+
+
+def test_compare_very_small_sigma_rel_with_precise_beta():
+    """
+    Test to compare sigma_rel=0.001 with beta values around 0.4 for more precision.
+
+    This test:
+    1. Runs PostHocEMA with sigma_rel=0.001
+    2. Runs traditional EMA with a range of beta values around 0.4
+    3. Prints the comparison to help identify the most precise match
+    """
+    # Common parameters
+    num_steps = 1000
+
+    # Create models
+    model_posthoc = SingleParamModel(initial_value=0.0)
+
+    # Import our implementation
+    from posthoc_ema import PostHocEMA
+
+    # Create our PostHocEMA instance
+    our_ema = PostHocEMA.from_model(
+        model_posthoc,
+        "./test-our-ema",
+        sigma_rels=(0.001,),
+        update_every=1,  # Update every step for more precision
+        checkpoint_every=50,
+        update_after_step=0,  # Start immediately
+    )
+
+    # Traditional EMA beta values to test, focusing around 0.4
+    beta_values = [0.35, 0.36, 0.37, 0.38, 0.39, 0.40, 0.41, 0.42, 0.43, 0.44, 0.45]
+
+    # Initialize EMA values for each beta
+    ema_values = {beta: 0.0 for beta in beta_values}
+
+    # Gradually update the model from 0 to 1
+    for step in range(num_steps):
+        # Linear interpolation from 0 to 1
+        target_value = step / (num_steps - 1)
+
+        with torch.no_grad():
+            model_posthoc.param.copy_(torch.tensor([target_value], dtype=torch.float32))
+
+        # Update traditional EMA values
+        for beta in beta_values:
+            ema_values[beta] = beta * ema_values[beta] + (1 - beta) * target_value
+
+        our_ema.update_(model_posthoc)
+
+    # Get PostHocEMA value
+    with our_ema.state_dict(sigma_rel=0.001) as state_dict:
+        posthoc_value = state_dict["param"].item()
+
+    print(f"\nPostHocEMA value for sigma_rel=0.001: {posthoc_value:.6f}")
+
+    # Print comparison with traditional EMA values
+    print("\nComparison with beta values around 0.4:")
+    for beta in sorted(beta_values):
+        diff = abs(ema_values[beta] - posthoc_value)
+        print(
+            f"  Beta={beta:.2f}: {ema_values[beta]:.6f} (diff: {diff:.6f}, {diff/posthoc_value*100:.4f}%)"
+        )
+
+    # Find the closest match
+    best_beta = None
+    best_diff = float("inf")
+    for beta in beta_values:
+        diff = abs(ema_values[beta] - posthoc_value)
+        if diff < best_diff:
+            best_diff = diff
+            best_beta = beta
+
+    print(
+        f"\nClosest match: beta={best_beta:.2f} with difference {best_diff:.6f} ({best_diff/posthoc_value*100:.4f}%)"
+    )
+
+    # Determine decay speed category
+    decay_speed = "Very fast decay"
+
+    print(f"\nREADME mapping entry:")
+    print(f"beta = {best_beta:.2f}  # {decay_speed} -> sigma_rel ≈ 0.001")
+
+    return {
+        "posthoc_value": posthoc_value,
+        "ema_values": ema_values,
+        "best_beta": best_beta,
+    }
