@@ -100,7 +100,7 @@ def sigma_rel_to_gamma(sigma_rel):
     return np.roots([1, 7, 16 - t, 12 - t]).real.max().item()
 
 
-class KarrasEMA(Module):
+class ReferenceKarrasEMA(Module):
     """
     Exponential Moving Average module using hyperparameters from the Karras et al. paper.
 
@@ -443,7 +443,7 @@ class PostHocEMA(Module):
         self._model = [model]
         self.ema_models = ModuleList(
             [
-                KarrasEMA(model, ema_model=ema_model, gamma=gamma, **kwargs)
+                ReferenceKarrasEMA(model, ema_model=ema_model, gamma=gamma, **kwargs)
                 for gamma in gammas
             ]
         )
@@ -520,7 +520,7 @@ class PostHocEMA(Module):
         gamma: float | None = None,
         sigma_rel: float | None = None,
         step: int | None = None,
-    ) -> KarrasEMA:
+    ) -> ReferenceKarrasEMA:
         """
         Synthesize a new EMA model with arbitrary gamma/sigma_rel after training.
 
@@ -533,7 +533,7 @@ class PostHocEMA(Module):
             step: Target training step to synthesize for (defaults to latest available)
 
         Returns:
-            KarrasEMA: A new EMA model with the requested profile
+            ReferenceKarrasEMA: A new EMA model with the requested profile
 
         Raises:
             AssertionError: If neither gamma nor sigma_rel is provided, or if requested
@@ -550,7 +550,7 @@ class PostHocEMA(Module):
         if exists(sigma_rel):
             gamma = sigma_rel_to_gamma(sigma_rel)
 
-        synthesized_ema_model = KarrasEMA(
+        synthesized_ema_model = ReferenceKarrasEMA(
             model=self.model,
             ema_model=self.maybe_ema_model,
             gamma=gamma,
@@ -590,7 +590,7 @@ class PostHocEMA(Module):
 
         # now sum up all the checkpoints using the weights one by one
 
-        tmp_ema_model = KarrasEMA(
+        tmp_ema_model = ReferenceKarrasEMA(
             model=self.model,
             ema_model=self.maybe_ema_model,
             gamma=gamma,

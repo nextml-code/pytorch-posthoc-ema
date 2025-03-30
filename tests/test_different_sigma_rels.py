@@ -76,6 +76,11 @@ def test_different_sigma_rels_produce_different_weights():
 
                 if key in state_dict_2:
                     diff = (state_dict_1[key] - state_dict_2[key]).abs()
+                    # Skip integer tensors or convert to float for mean calculation
+                    if diff.dtype in [torch.int, torch.int8, torch.int16, torch.int32, torch.int64, torch.long]:
+                        if "num_batches_tracked" in key:
+                            continue  # Skip entirely
+                        diff = diff.float()
                     max_diff = max(max_diff, diff.max().item())
                     mean_diff += diff.mean().item()
                     num_params += 1
@@ -92,8 +97,8 @@ def test_different_sigma_rels_produce_different_weights():
 
             # Also verify that no weights are identical (except running stats)
             for key in state_dict_1.keys():
-                # Skip batch norm running statistics
-                if "running_" in key:
+                # Skip batch norm running statistics and num_batches_tracked
+                if "running_" in key or "num_batches_tracked" in key:
                     continue
 
                 if key in state_dict_2:
@@ -240,6 +245,11 @@ def test_different_sigma_rels_with_only_save_diff():
 
                 if key in state_dict_2:
                     diff = (state_dict_1[key] - state_dict_2[key]).abs()
+                    # Skip integer tensors or convert to float for mean calculation
+                    if diff.dtype in [torch.int, torch.int8, torch.int16, torch.int32, torch.int64, torch.long]:
+                        if "num_batches_tracked" in key:
+                            continue  # Skip entirely
+                        diff = diff.float()
                     max_diff = max(max_diff, diff.max().item())
                     mean_diff += diff.mean().item()
                     num_params += 1
@@ -256,8 +266,8 @@ def test_different_sigma_rels_with_only_save_diff():
 
             # Also verify that no weights are identical (except running stats)
             for key in state_dict_1.keys():
-                # Skip batch norm running statistics
-                if "running_" in key:
+                # Skip batch norm running statistics and num_batches_tracked
+                if "running_" in key or "num_batches_tracked" in key:
                     continue
 
                 if key in state_dict_2:
@@ -405,6 +415,11 @@ def test_only_save_diff_doesnt_affect_grad_params():
 
                     # Check if parameters match exactly
                     diff = (param_with_diff - param_without_diff).abs()
+                    # Handle integer tensors
+                    if diff.dtype in [torch.int, torch.int8, torch.int16, torch.int32, torch.int64, torch.long]:
+                        if "num_batches_tracked" in key:
+                            continue  # Skip integer tracking tensors
+                        diff = diff.float()
                     max_diff = diff.max().item()
                     mean_diff = diff.mean().item()
 

@@ -11,6 +11,7 @@ from torch import nn
 import pickle
 import io
 import torch.serialization
+import gc
 
 from .karras_ema import KarrasEMA
 from .utils import _safe_torch_load, p_dot_p, sigma_rel_to_gamma, solve_weights
@@ -107,6 +108,10 @@ class PostHocEMA:
                     "Use from_path() to load existing checkpoints instead of from_model()."
                 )
 
+        # Ensure sigma_rels has a default value if None
+        if sigma_rels is None:
+            sigma_rels = (0.05, 0.28)  # Default values from paper
+
         instance = cls(
             checkpoint_dir=checkpoint_dir,
             max_checkpoints=max_checkpoints,
@@ -128,17 +133,22 @@ class PostHocEMA:
 
         try:
             # Initialize EMA models on CPU
-            instance.ema_models = nn.ModuleList(
-                [
-                    KarrasEMA(
-                        model,
-                        sigma_rel=sigma_rel,
-                        update_every=instance.update_every,
-                        only_save_diff=instance.only_save_diff,
-                    )
-                    for sigma_rel in instance.sigma_rels
-                ]
-            )
+
+            # Initialize models one at a time
+            ema_models = []
+            for sigma_rel in sigma_rels:
+                ema = KarrasEMA(
+                    model, 
+                    sigma_rel=sigma_rel, 
+                    update_every=update_every, 
+                    only_save_diff=only_save_diff,
+                    device='cpu'  # Explicitly set device to CPU
+                )
+                # Don't explicitly initialize parameters - let it happen naturally
+                # on the first update to match reference implementation
+                ema_models.append(ema)
+                gc.collect()  # Force garbage collection
+            instance.ema_models = nn.ModuleList(ema_models)
 
             # Move model back to original device
             model.to(original_device)
@@ -270,16 +280,14 @@ class PostHocEMA:
             # Filter parameters based on only_save_diff
             if self.only_save_diff:
                 filtered_state_dict = {}
-                for name, param in ema_model.ema_model.named_parameters():
+                for name, param in ema_model.online_model[0].named_parameters():
                     if param.requires_grad:
-                        key = name
-                        if key in state_dict:
-                            filtered_state_dict[key] = state_dict[key]
+                        if name in state_dict:
+                            filtered_state_dict[name] = state_dict[name]
                 # Add buffers and internal state
-                for name, buffer in ema_model.ema_model.named_buffers():
-                    key = name
-                    if key in state_dict:
-                        filtered_state_dict[key] = state_dict[key]
+                for name, buffer in ema_model.online_model[0].named_buffers():
+                    if name in state_dict:
+                        filtered_state_dict[name] = state_dict[name]
                 for key in ["initted", "step"]:
                     if key in state_dict:
                         filtered_state_dict[key] = state_dict[key]
@@ -596,6 +604,10 @@ class PostHocEMA:
         Returns:
             PIL.Image.Image: Plot showing reconstruction errors for different sigma_rel values
         """
+        # Ensure sigma_rels is not None and has a valid value
+        if not hasattr(self, 'sigma_rels') or self.sigma_rels is None:
+            self.sigma_rels = (0.05, 0.28)  # Default values
+            
         target_sigma_rels, errors, _ = compute_reconstruction_errors(
             sigma_rels=self.sigma_rels,
             target_sigma_rel_range=target_sigma_rel_range,
